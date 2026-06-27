@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -57,7 +58,7 @@ type Config struct {
 
 // Load reads configuration from environment variables with defaults.
 func Load() (Config, error) {
-	salt := os.Getenv("PATIENT_HASH_SALT")
+	salt := secretEnv("PATIENT_HASH_SALT")
 	if salt == "" {
 		return Config{}, ErrMissingSalt
 	}
@@ -100,7 +101,7 @@ func Load() (Config, error) {
 			Host:        envStr("DB_HOST", "localhost"),
 			Port:        dbPort,
 			User:        os.Getenv("DB_USER"),
-			Password:    os.Getenv("DB_PASSWORD"),
+			Password:    secretEnv("DB_PASSWORD"),
 			Name:        envStr("DB_NAME", "analysis_bi"),
 			MaxConns:    maxConns,
 			IdleTimeout: idleTimeout,
@@ -187,4 +188,21 @@ func envDuration(key string, fallback time.Duration) (time.Duration, error) {
 		return fallback, nil
 	}
 	return time.ParseDuration(v)
+}
+
+// secretEnv lê um secret preferindo o arquivo apontado por `<KEY>_FILE`
+// (Docker secrets / OpenBao montam em /run/secrets), com fallback no env `<KEY>`.
+//
+// POR QUÊ: secrets (senha do banco, salt de anonimização) não devem vir de variável
+// de ambiente — env aparece em `docker inspect`, em /proc/<pid>/environ e pode vazar
+// em log. Padrão das imagens oficiais (sufixo `_FILE`). A imagem deste serviço é
+// `scratch` (sem shell) → não há entrypoint-wrapper possível; o app lê o arquivo
+// aqui. Mantém o env como FALLBACK (dev/compat).
+func secretEnv(key string) string {
+	if path := os.Getenv(key + "_FILE"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return os.Getenv(key)
 }
