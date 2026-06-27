@@ -49,13 +49,15 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Load geography CSV lookup
-	geoCSVPath := os.Getenv("GEO_CSV_PATH")
-	if geoCSVPath == "" {
-		geoCSVPath = "configs/ibge_mesoregions.csv"
-	}
+	// Load geography CSV lookup. O CSV é embedado no binário (go:embed) — funciona
+	// na imagem `scratch`, sem filesystem. GEO_CSV_PATH sobrescreve com um arquivo.
 	var geoLookup domain.GeographyLookup
-	csvLookup, err := domain.NewCSVGeographyLookup(geoCSVPath)
+	var csvLookup *domain.CSVGeographyLookup
+	if geoCSVPath := os.Getenv("GEO_CSV_PATH"); geoCSVPath != "" {
+		csvLookup, err = domain.NewCSVGeographyLookup(geoCSVPath)
+	} else {
+		csvLookup, err = domain.NewCSVGeographyLookupFromReader(strings.NewReader(configs.IBGEMesoregionsCSV))
+	}
 	if err != nil {
 		logger.Warn("geography CSV not loaded, CEP resolution will return errors", "error", err)
 		geoLookup = &errGeographyLookup{}
