@@ -3,10 +3,13 @@ package ingestion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/acdgbrasil/svc-analysis-bi/internal/domain"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // pipeline implements the Pipeline interface, orchestrating the flow from
@@ -227,6 +230,22 @@ func (p *pipeline) materializeStage(ctx context.Context, job materializeJob) {
 	// to idempotent UPSERTs), but we must NOT ack — otherwise the dedup marker
 	// is lost and the event could be double-counted on schema changes.
 	if err := p.eventStore.MarkProcessed(ctx, record.EventID, string(record.EventType)); err != nil {
+		if isPermanentDBError(err) {
+			// Permanent failure (e.g. event id is not a UUID against the UUID-typed
+			// event_processing_log — SQLSTATE 22P02): every redelivery fails identically,
+			// which would wedge the durable consumer forever and stall the ack floor.
+			// The fact is already materialized (idempotent upsert), so ack to drop the
+			// poison message instead of looping. Note: the DLQ tables are also UUID-typed,
+			// so a synthetic-id DLQ insert would fail the same way — the structured log
+			// below is the audit trail for these malformed events.
+			p.logger.Warn("mark-processed hit a permanent data error; acking to drop poison event",
+				"eventId", record.EventID, "eventType", record.EventType, "error", err)
+			if ackErr := job.ack(); ackErr != nil {
+				p.logger.Warn("failed to ack poison event", "eventId", record.EventID, "error", ackErr)
+			}
+			return
+		}
+		// Transient failure: skip ack so NATS redelivers (safe due to idempotent UPSERTs).
 		p.logger.Warn("failed to mark event as processed, skipping ack", "eventId", record.EventID, "error", err)
 		return
 	}
@@ -262,6 +281,20 @@ func (p *pipeline) materialize(ctx context.Context, record AnonymizedRecord) err
 // extractEventID attempts to pull the event "id" from raw JSON bytes.
 // Swift events have "id" as a top-level UUID field (no metadata wrapper).
 // Returns the eventID and true if found, or empty string and false on failure.
+// isPermanentDBError reports whether err is a Postgres error that will fail
+// identically on every retry, so the offending event must be dropped (acked)
+// rather than redelivered. SQLSTATE class "22" is "data exception" — e.g. 22P02
+// invalid_text_representation, raised when a non-UUID event id is written to a
+// UUID column. Transient errors (connection loss, deadlocks) are NOT class 22
+// and fall through to the redelivery path.
+func isPermanentDBError(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return strings.HasPrefix(pgErr.Code, "22")
+}
+
 func extractEventID(data []byte) (string, bool) {
 	var envelope struct {
 		ID string `json:"id"`

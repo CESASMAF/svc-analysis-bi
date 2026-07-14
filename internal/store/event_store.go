@@ -31,7 +31,7 @@ func (s *PgEventStore) IsProcessed(ctx context.Context, eventID string) (bool, e
 		eventID,
 	).Scan(&exists)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", ErrEventCheckFailed, err)
+		return false, fmt.Errorf("%w: %w", ErrEventCheckFailed, err)
 	}
 	return exists, nil
 }
@@ -42,7 +42,7 @@ func (s *PgEventStore) MarkProcessed(ctx context.Context, eventID string, eventT
 		eventID, eventType,
 	)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrEventMarkFailed, err)
+		return fmt.Errorf("%w: %w", ErrEventMarkFailed, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrEventAlreadyProcessed
@@ -56,7 +56,7 @@ func (s *PgEventStore) SendToDLQ(ctx context.Context, eventID string, eventType 
 		eventID, eventType, payload, errMsg,
 	)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrDLQInsertFailed, err)
+		return fmt.Errorf("%w: %w", ErrDLQInsertFailed, err)
 	}
 	return nil
 }

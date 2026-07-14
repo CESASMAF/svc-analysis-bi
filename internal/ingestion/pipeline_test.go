@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/acdgbrasil/svc-analysis-bi/internal/domain"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ---------------------------------------------------------------------------
@@ -422,6 +423,92 @@ func TestNewPipeline_ReturnsNonNil(t *testing.T) {
 	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
 	if pipeline == nil {
 		t.Fatal("NewPipeline must return a non-nil Pipeline")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: a permanent MarkProcessed error (e.g. non-UUID event id, SQLSTATE 22P02)
+// must NOT wedge the consumer — the fact is already materialized, so the poison
+// message is acked and dropped instead of looping on redelivery forever.
+// Regression for the "event with non-UUID id → redelivery loop" gap.
+// ---------------------------------------------------------------------------
+
+func TestPipeline_PermanentMarkError_AcksToDropPoison(t *testing.T) {
+	eventStore := newFakeEventStore()
+	// Simulate Postgres rejecting a non-UUID event id (class 22 = data exception).
+	eventStore.markErr = &pgconn.PgError{Code: "22P02", Message: "invalid input syntax for type uuid"}
+	factStore := newFakeFactStore()
+	geoLookup := newFakeGeographyLookup()
+	registry := NewEventHandlerRegistry(geoLookup, "test-salt")
+
+	payload, _ := json.Marshal(map[string]any{
+		"id":         "not-a-uuid",
+		"occurredAt": "2025-06-15T10:00:00Z",
+		"actorId":    "actor-001",
+		"patientId":  "pat-poison",
+		"personId":   "person-poison",
+		"birthDate":  "1990-01-01",
+		"sex":        "MALE",
+		"cep":        "13083970",
+	})
+
+	ackTrack := newAckTracker()
+	consumer := newFakeConsumer(RawMessage{
+		Subject: string(domain.EventPatientCreated),
+		Data:    payload,
+		Ack:     ackTrack.ack,
+	})
+
+	cfg := PipelineConfig{RawBufferSize: 10, AnonymizedBufferSize: 10, AnonymizeWorkers: 1, MaterializeWorkers: 1}
+	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = pipeline.Run(ctx)
+
+	// The fact is materialized (idempotent), and the poison message is acked so it
+	// is NOT redelivered — breaking the loop.
+	if ackTrack.ackCount() == 0 {
+		t.Error("Ack must be called to drop a poison event with a permanent (class-22) mark error")
+	}
+}
+
+// A transient MarkProcessed error (not a Postgres data-exception) must still skip
+// the ack so NATS redelivers — we only drop on PERMANENT failures.
+func TestPipeline_TransientMarkError_SkipsAckForRedelivery(t *testing.T) {
+	eventStore := newFakeEventStore()
+	eventStore.markErr = errors.New("connection reset by peer") // transient, not a *pgconn.PgError
+	factStore := newFakeFactStore()
+	geoLookup := newFakeGeographyLookup()
+	registry := NewEventHandlerRegistry(geoLookup, "test-salt")
+
+	payload, _ := json.Marshal(map[string]any{
+		"id":         "evt-transient-001",
+		"occurredAt": "2025-06-15T10:00:00Z",
+		"actorId":    "actor-001",
+		"patientId":  "pat-transient",
+		"personId":   "person-transient",
+		"birthDate":  "1990-01-01",
+		"sex":        "MALE",
+		"cep":        "13083970",
+	})
+
+	ackTrack := newAckTracker()
+	consumer := newFakeConsumer(RawMessage{
+		Subject: string(domain.EventPatientCreated),
+		Data:    payload,
+		Ack:     ackTrack.ack,
+	})
+
+	cfg := PipelineConfig{RawBufferSize: 10, AnonymizedBufferSize: 10, AnonymizeWorkers: 1, MaterializeWorkers: 1}
+	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = pipeline.Run(ctx)
+
+	if ackTrack.ackCount() != 0 {
+		t.Error("Ack must NOT be called on a transient mark error — the event should be redelivered")
 	}
 }
 
