@@ -56,11 +56,11 @@ jobs:
     permissions:
       contents: write
 
-  kodus-review:
-    name: Kodus AI Review
-    if: github.event_name == 'pull_request'
-    uses: acdgbrasil/.github/.github/workflows/reusable-kodus-review.yml@main
-    with:
-      fail_on: critical
-    secrets:
-      KODUS_TEAM_KEY: ${{ secrets.KODUS_TEAM_KEY }}
+# NOTA: o job `kodus-review` (review de IA) foi removido nesta org. Ele chama
+# `acdgbrasil/.github/.github/workflows/reusable-kodus-review.yml` passando
+# `secrets.KODUS_TEAM_KEY`, que existe na org acdgbrasil mas NÃO na CESASMAF —
+# aqui a chave chegava vazia e TODO pull request falhava no check, desde o
+# primeiro PR do repo. Como só roda em `pull_request`, a `main` parecia verde e
+# o vermelho só aparecia no PR, onde importa.
+# Para reativar: criar o secret `KODUS_TEAM_KEY` na org CESASMAF (ou no repo) e
+# restaurar o job — o reusable workflow do upstream continua disponível.
