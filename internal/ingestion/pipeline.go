@@ -3,10 +3,12 @@ package ingestion
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/acdgbrasil/svc-analysis-bi/internal/domain"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // pipeline implements the Pipeline interface, orchestrating the flow from
@@ -138,6 +140,7 @@ func (p *pipeline) Run(ctx context.Context) error {
 type materializeJob struct {
 	record AnonymizedRecord
 	ack    AckFunc
+	term   AckFunc
 }
 
 // anonymizeStage processes a single raw message: dedup, handler dispatch,
@@ -156,6 +159,12 @@ func (p *pipeline) anonymizeStage(ctx context.Context, msg RawMessage, out chan<
 		}
 		dlqPayload := sanitizeForDLQ(msg.Data)
 		if err := p.eventStore.SendToDLQ(ctx, eventID, eventType, dlqPayload, ErrUnknownEventType.Error()); err != nil {
+			if isPermanentDBError(err) {
+				// The DLQ insert itself can never succeed for this datum — redelivering
+				// would loop forever. Drop it; the structured log is the audit trail.
+				p.dropPoison(eventID, eventType, err, msg.Term, msg.Ack)
+				return
+			}
 			p.logger.Warn("failed to send unknown event to DLQ, skipping ack to force redelivery", "eventId", eventID, "error", err)
 			return // don't ack — DLQ failed, let NATS redeliver
 		}
@@ -189,6 +198,13 @@ func (p *pipeline) anonymizeStage(ctx context.Context, msg RawMessage, out chan<
 		}
 		dlqPayload := sanitizeForDLQ(msg.Data)
 		if dlqErr := p.eventStore.SendToDLQ(ctx, eventID, msg.Subject, dlqPayload, err.Error()); dlqErr != nil {
+			if isPermanentDBError(dlqErr) {
+				// Most likely poison path: an event with a malformed id is usually
+				// malformed elsewhere too, so it fails the handler and lands here —
+				// never reaching MarkProcessed.
+				p.dropPoison(eventID, msg.Subject, dlqErr, msg.Term, msg.Ack)
+				return
+			}
 			p.logger.Warn("failed to send handler error to DLQ, skipping ack to force redelivery", "eventId", eventID, "error", dlqErr)
 			return // don't ack — DLQ failed, let NATS redeliver
 		}
@@ -202,9 +218,31 @@ func (p *pipeline) anonymizeStage(ctx context.Context, msg RawMessage, out chan<
 	// 5. Send to materialization stage (with context-aware select to prevent
 	// blocking on shutdown when anonCh is full)
 	select {
-	case out <- materializeJob{record: record, ack: msg.Ack}:
+	case out <- materializeJob{record: record, ack: msg.Ack, term: msg.Term}:
 	case <-ctx.Done():
 		p.logger.Warn("pipeline shutting down, dropping anonymized record", "eventId", record.EventID)
+	}
+}
+
+// dropPoison removes a message that can never be processed from the consumer's
+// redelivery loop. Prefers Term (JetStream semantics for poison data: stops
+// redelivery AND publishes the MSG_TERMINATED advisory) and falls back to Ack
+// when the consumer does not provide Term, since leaving the message pending
+// would wedge the durable consumer forever.
+func (p *pipeline) dropPoison(eventID, eventType string, cause error, term, ack AckFunc) {
+	p.logger.Warn("permanent data error; dropping poison event",
+		"eventId", eventID, "eventType", eventType, "error", cause)
+
+	drop, how := term, "term"
+	if drop == nil {
+		drop, how = ack, "ack"
+	}
+	if drop == nil {
+		p.logger.Warn("cannot drop poison event: neither Term nor Ack available", "eventId", eventID)
+		return
+	}
+	if err := drop(); err != nil {
+		p.logger.Warn("failed to drop poison event", "eventId", eventID, "via", how, "error", err)
 	}
 }
 
@@ -217,6 +255,10 @@ func (p *pipeline) materializeStage(ctx context.Context, job materializeJob) {
 		// Materialization failed -> DLQ, do NOT ack (let NATS redeliver for transient failures)
 		dlqPayload := sanitizeForDLQ(nil) // no raw payload at this stage
 		if dlqErr := p.eventStore.SendToDLQ(ctx, record.EventID, string(record.EventType), dlqPayload, err.Error()); dlqErr != nil {
+			if isPermanentDBError(dlqErr) {
+				p.dropPoison(record.EventID, string(record.EventType), dlqErr, job.term, job.ack)
+				return
+			}
 			p.logger.Warn("failed to send materialization error to DLQ", "eventId", record.EventID, "error", dlqErr)
 		}
 		return
@@ -227,6 +269,22 @@ func (p *pipeline) materializeStage(ctx context.Context, job materializeJob) {
 	// to idempotent UPSERTs), but we must NOT ack — otherwise the dedup marker
 	// is lost and the event could be double-counted on schema changes.
 	if err := p.eventStore.MarkProcessed(ctx, record.EventID, string(record.EventType)); err != nil {
+		if isPermanentDBError(err) {
+			// Defense in depth. Since TICKET-008 the store normalizes the event id
+			// (UUIDv5 for non-UUID values), so 22P02 should no longer reach here —
+			// the dedup marker IS written even for malformed ids. If some other
+			// impossible datum shows up, drop the message instead of letting it
+			// redeliver forever and stall the consumer's ack floor.
+			//
+			// Dropping is safe for the fact already materialized above, but note it
+			// leaves NO dedup marker: a later replay would materialize it again, and
+			// the Increment* facts accumulate (col = col + EXCLUDED.col) rather than
+			// being idempotent. That is why the real fix is the id normalization,
+			// not this branch.
+			p.dropPoison(record.EventID, string(record.EventType), err, job.term, job.ack)
+			return
+		}
+		// Transient failure: skip ack so NATS redelivers (safe due to idempotent UPSERTs).
 		p.logger.Warn("failed to mark event as processed, skipping ack", "eventId", record.EventID, "error", err)
 		return
 	}
@@ -257,6 +315,30 @@ func (p *pipeline) materialize(ctx context.Context, record AnonymizedRecord) err
 	default:
 		return fmt.Errorf("%w: unknown fact kind %q", ErrMaterializationFailed, record.Kind)
 	}
+}
+
+// pgCodeInvalidTextRepresentation is SQLSTATE 22P02 (invalid_text_representation),
+// raised when a value cannot be parsed as the column's type — e.g. a non-UUID
+// string written to a UUID column.
+//
+// Deliberately narrow: the rest of SQLSTATE class 22 ("data exception") includes
+// codes such as 22001 (string_data_right_truncation) and 22003
+// (numeric_value_out_of_range), which signal a schema/handler mismatch on OUR
+// side, not bad data from the producer. Dropping an event on those would discard
+// good data to hide our own bug, so they stay on the redelivery path where they
+// remain visible.
+const pgCodeInvalidTextRepresentation = "22P02"
+
+// isPermanentDBError reports whether err is a Postgres error that will fail
+// identically on every retry, meaning redelivery cannot help and the message has
+// to leave the consumer's queue. Transient errors (connection loss, deadlocks)
+// are not included and fall through to the redelivery path.
+func isPermanentDBError(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == pgCodeInvalidTextRepresentation
 }
 
 // extractEventID attempts to pull the event "id" from raw JSON bytes.
