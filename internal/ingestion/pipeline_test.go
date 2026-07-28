@@ -429,8 +429,13 @@ func TestNewPipeline_ReturnsNonNil(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test: a permanent MarkProcessed error (e.g. non-UUID event id, SQLSTATE 22P02)
 // must NOT wedge the consumer — the fact is already materialized, so the poison
-// message is acked and dropped instead of looping on redelivery forever.
+// message is dropped instead of looping on redelivery forever.
 // Regression for the "event with non-UUID id → redelivery loop" gap.
+//
+// NB (TICKET-008): this RawMessage sets no `Term`, so the case now exercises the
+// FALLBACK path — a consumer without Term support drops via Ack, which at least
+// unblocks the queue. The preferred path is covered by
+// TestPipeline_PermanentMarkError_TerminatesInsteadOfAcking.
 // ---------------------------------------------------------------------------
 
 func TestPipeline_PermanentMarkError_AcksToDropPoison(t *testing.T) {
@@ -514,3 +519,121 @@ func TestPipeline_TransientMarkError_SkipsAckForRedelivery(t *testing.T) {
 
 // Ensure fakeEventStore satisfies EventProcessingStore
 var _ EventProcessingStore = (*fakeEventStore)(nil)
+
+// ---------------------------------------------------------------------------
+// TICKET-008 / W0 (RED) — descarte de poison message usa Term(), não Ack().
+//
+// `Ack` significa "processado com sucesso": o servidor não distingue um descarte
+// de um sucesso real e o evento some das métricas do consumidor. O JetStream tem
+// `Term` exatamente para dado que nunca poderá ser processado — e ele publica
+// advisory em $JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.<STREAM>.<CONSUMER>,
+// que é o que permite montar DLQ observável.
+// ---------------------------------------------------------------------------
+
+func TestPipeline_PermanentMarkError_TerminatesInsteadOfAcking(t *testing.T) {
+	eventStore := newFakeEventStore()
+	eventStore.markErr = &pgconn.PgError{Code: "22P02", Message: "invalid input syntax for type uuid"}
+	factStore := newFakeFactStore()
+	geoLookup := newFakeGeographyLookup()
+	registry := NewEventHandlerRegistry(geoLookup, "test-salt")
+
+	payload, _ := json.Marshal(map[string]any{
+		"id":         "not-a-uuid",
+		"occurredAt": "2025-06-15T10:00:00Z",
+		"actorId":    "actor-001",
+		"patientId":  "pat-poison",
+		"personId":   "person-poison",
+		"birthDate":  "1990-01-01",
+		"sex":        "MALE",
+		"cep":        "13083970",
+	})
+
+	ackTrack := newAckTracker()
+	termTrack := newAckTracker()
+	consumer := newFakeConsumer(RawMessage{
+		Subject: string(domain.EventPatientCreated),
+		Data:    payload,
+		Ack:     ackTrack.ack,
+		Term:    termTrack.ack,
+	})
+
+	cfg := PipelineConfig{RawBufferSize: 10, AnonymizedBufferSize: 10, AnonymizeWorkers: 1, MaterializeWorkers: 1}
+	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = pipeline.Run(ctx)
+
+	if termTrack.ackCount() == 0 {
+		t.Error("Term deve ser chamado para descartar poison event (semântica correta no JetStream)")
+	}
+	if ackTrack.ackCount() != 0 {
+		t.Error("Ack NÃO deve ser chamado: o evento não foi processado com sucesso, foi descartado")
+	}
+}
+
+// Um erro PERMANENTE no SendToDLQ também não pode travar a fila. Antes do
+// TICKET-008 este caminho (handler falha -> DLQ falha) reentregava para sempre,
+// e era o mais provável: um evento com id inválido normalmente está malformado
+// em outros campos também, então falha no handler e nunca chega ao MarkProcessed.
+func TestPipeline_PermanentDLQError_TerminatesInsteadOfLooping(t *testing.T) {
+	eventStore := newFakeEventStore()
+	eventStore.dlqErr = &pgconn.PgError{Code: "22P02", Message: "invalid input syntax for type uuid"}
+	factStore := newFakeFactStore()
+	geoLookup := newFakeGeographyLookup()
+	registry := NewEventHandlerRegistry(geoLookup, "test-salt")
+
+	// Payload que o handler REJEITA (campos obrigatórios ausentes) -> vai para DLQ.
+	payload, _ := json.Marshal(map[string]any{"id": "not-a-uuid"})
+
+	ackTrack := newAckTracker()
+	termTrack := newAckTracker()
+	consumer := newFakeConsumer(RawMessage{
+		Subject: string(domain.EventPatientCreated),
+		Data:    payload,
+		Ack:     ackTrack.ack,
+		Term:    termTrack.ack,
+	})
+
+	cfg := PipelineConfig{RawBufferSize: 10, AnonymizedBufferSize: 10, AnonymizeWorkers: 1, MaterializeWorkers: 1}
+	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = pipeline.Run(ctx)
+
+	if termTrack.ackCount() == 0 {
+		t.Error("DLQ com erro permanente deve terminar a mensagem em vez de deixá-la reentregar para sempre")
+	}
+}
+
+// Erro TRANSITÓRIO no DLQ continua sem ack e sem term — a mensagem DEVE voltar.
+func TestPipeline_TransientDLQError_LeavesMessageForRedelivery(t *testing.T) {
+	eventStore := newFakeEventStore()
+	eventStore.dlqErr = errors.New("connection reset by peer")
+	factStore := newFakeFactStore()
+	geoLookup := newFakeGeographyLookup()
+	registry := NewEventHandlerRegistry(geoLookup, "test-salt")
+
+	payload, _ := json.Marshal(map[string]any{"id": "3f2504e0-4f89-11d3-9a0c-0305e82c3301"})
+
+	ackTrack := newAckTracker()
+	termTrack := newAckTracker()
+	consumer := newFakeConsumer(RawMessage{
+		Subject: string(domain.EventPatientCreated),
+		Data:    payload,
+		Ack:     ackTrack.ack,
+		Term:    termTrack.ack,
+	})
+
+	cfg := PipelineConfig{RawBufferSize: 10, AnonymizedBufferSize: 10, AnonymizeWorkers: 1, MaterializeWorkers: 1}
+	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = pipeline.Run(ctx)
+
+	if ackTrack.ackCount() != 0 || termTrack.ackCount() != 0 {
+		t.Error("falha transitória no DLQ não pode consumir a mensagem: sem Ack e sem Term, para o NATS reentregar")
+	}
+}

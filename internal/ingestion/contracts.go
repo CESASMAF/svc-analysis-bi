@@ -68,6 +68,18 @@ type RawMessage struct {
 	// Ack acknowledges the message to NATS JetStream.
 	// Must be called exactly once, after successful materialization.
 	Ack AckFunc
+
+	// Term terminates the message: instructs JetStream to stop redelivering
+	// because the data itself can never be processed (poison message).
+	//
+	// Differs from Ack, which means "processed successfully" — using Ack to drop
+	// a message hides the drop among the successes. Term publishes an advisory to
+	// $JS.EVENT.ADVISORY.CONSUMER.MSG_TERMINATED.<STREAM>.<CONSUMER>, which is
+	// what makes a server-side Dead Letter Queue observable.
+	//
+	// May be nil (older fakes, consumers that do not support it): the pipeline
+	// then falls back to Ack, which at least unblocks the queue.
+	Term AckFunc
 }
 
 // ---------------------------------------------------------------------------

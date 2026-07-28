@@ -24,11 +24,19 @@ func NewEventStore(pool *pgxpool.Pool) *PgEventStore {
 	return &PgEventStore{pool: pool}
 }
 
+// As três operações normalizam o id com normalizeEventID antes do SQL. As colunas
+// `event_processing_log.event_id` e `event_dlq.event_id` são UUID; um id textual
+// (ou o literal "unknown", que o pipeline usa quando não consegue extrair o `id`
+// do payload) faria o insert falhar com SQLSTATE 22P02 e — pior que o erro em si —
+// deixaria o evento sem marker de dedup, abrindo espaço para materializá-lo mais
+// de uma vez. Como a derivação é determinística, IsProcessed e MarkProcessed
+// concordam entre si e entre réplicas. Ver internal/store/event_id.go.
+
 func (s *PgEventStore) IsProcessed(ctx context.Context, eventID string) (bool, error) {
 	var exists bool
 	err := s.pool.QueryRow(ctx,
 		"SELECT EXISTS(SELECT 1 FROM event_processing_log WHERE event_id = $1 AND status = 'processed')",
-		eventID,
+		normalizeEventID(eventID),
 	).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", ErrEventCheckFailed, err)
@@ -39,7 +47,7 @@ func (s *PgEventStore) IsProcessed(ctx context.Context, eventID string) (bool, e
 func (s *PgEventStore) MarkProcessed(ctx context.Context, eventID string, eventType string) error {
 	tag, err := s.pool.Exec(ctx,
 		"INSERT INTO event_processing_log (event_id, event_type, status) VALUES ($1, $2, 'processed') ON CONFLICT (event_id) DO NOTHING",
-		eventID, eventType,
+		normalizeEventID(eventID), eventType,
 	)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrEventMarkFailed, err)
@@ -53,7 +61,7 @@ func (s *PgEventStore) MarkProcessed(ctx context.Context, eventID string, eventT
 func (s *PgEventStore) SendToDLQ(ctx context.Context, eventID string, eventType string, payload []byte, errMsg string) error {
 	_, err := s.pool.Exec(ctx,
 		"INSERT INTO event_dlq (event_id, event_type, payload, error) VALUES ($1, $2, $3, $4)",
-		eventID, eventType, payload, errMsg,
+		normalizeEventID(eventID), eventType, payload, errMsg,
 	)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrDLQInsertFailed, err)

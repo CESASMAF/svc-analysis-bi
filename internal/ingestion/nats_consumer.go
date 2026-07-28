@@ -99,6 +99,11 @@ func (c *natsConsumer) Subscribe(ctx context.Context, out chan<- RawMessage) err
 				Ack: func() error {
 					return natsMsg.Ack()
 				},
+				// Term: poison message — stop redelivering. Emits the
+				// MSG_TERMINATED advisory, unlike Ack.
+				Term: func() error {
+					return natsMsg.Term()
+				},
 			}
 
 			select {
