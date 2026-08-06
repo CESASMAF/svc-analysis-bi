@@ -131,3 +131,20 @@ func validateCEP(cep string) error {
 	}
 	return nil
 }
+
+// AgeBandFromLabel resolves a band label produced upstream ("0-4", "80+") back
+// into the full AgeBand, so the label never has to be parsed ad hoc.
+//
+// Since social-care started generalizing at the source (no birthDate crosses
+// the boundary), this is how the band enters the pipeline. It is deliberately
+// a lookup against allAgeBands and NOT a parser: the set of bands is a
+// modelling decision shared by both services, and an unrecognized label must
+// fail loudly rather than be reconstructed into something plausible.
+func AgeBandFromLabel(label string) (AgeBand, bool) {
+	for _, band := range allAgeBands() {
+		if band.Label == label {
+			return band, true
+		}
+	}
+	return AgeBand{}, false
+}

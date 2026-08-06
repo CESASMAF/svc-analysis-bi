@@ -24,15 +24,37 @@ type jsonEventBase struct {
 	PatientID  string `json:"patientId"`
 }
 
+// jsonPatientCreated carries quasi-identifiers that social-care ALREADY
+// generalized. This service never receives birthDate or CEP: they are PII, and
+// generalizing at the source is what makes "no PII reaches analysis-bi" true in
+// code rather than only in the docs (see DemographicGeneralization in the Swift
+// side, and scripts/gen-ibge-table.py for the shared IBGE table).
+//
+// Every field is optional because a patient may be registered without personal
+// data or without an address. Empty means "unknown" and must stay
+// distinguishable from a real category — never coerce it to a default.
 type jsonPatientCreated struct {
 	jsonEventBase
-	PersonID         string `json:"personId"`
-	BirthDate        string `json:"birthDate"`        // optional — may come in SocialIdentityUpdated instead
-	Sex              string `json:"sex"`               // optional
-	CEP              string `json:"cep"`               // optional
-	HousingType      string `json:"housingType"`       // optional
-	TotalIncomeCents *int64 `json:"totalIncomeCents"`  // optional
+	PersonID string `json:"personId"`
+
+	AgeBand        string `json:"ageBand"`        // "0-4" … "75-79", "80+"
+	Sex            string `json:"sex"`            // masculino | feminino | outro
+	MesoregionCode string `json:"mesoregionCode"` // IBGE
+	MesoregionName string `json:"mesoregionName"`
+	StateCode      string `json:"stateCode"`
+
 }
+
+// NOTE — lacuna conhecida (auditoria 2026-08-06). Esta struct declarava
+// `housingType` e `totalIncomeCents`, que social-care NUNCA envia no
+// PatientCreated: moradia e renda mudam por avaliação social, não no cadastro,
+// e viajam em HousingConditionUpdatedEvent / SocioEconomicSituationUpdatedEvent.
+// Campos removidos por serem promessa falsa — ficavam sempre no zero-value.
+//
+// O buraco de verdade é outro e continua aberto: anonymizeGenericAssessment
+// produz FactKindPatientSnapshot mas não extrai `housingType` nem renda do
+// `after` desses eventos. Enquanto isso, Snapshot.HousingType e
+// Snapshot.IncomeBand nunca são populados por ninguém.
 
 type jsonAssessmentUpdated struct {
 	jsonEventBase

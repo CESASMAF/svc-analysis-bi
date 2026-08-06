@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -88,39 +87,32 @@ func (a *Anonymizer) anonymizePatientCreated(data []byte) (AnonymizedRecord, err
 	}
 
 	period := domain.PeriodFromTime(occurredAt)
-	snapshot := &SnapshotPayload{
-		HousingType: evt.HousingType,
-	}
+	snapshot := &SnapshotPayload{}
 
-	// BirthDate, Sex, CEP are optional in PatientCreatedEvent — they may
-	// arrive in separate assessment update events (SocialIdentityUpdated, etc.)
-	if evt.BirthDate != "" {
-		birthDate, parseErr := time.Parse("2006-01-02", evt.BirthDate)
-		if parseErr == nil {
-			// Use occurredAt as age reference (not year-1) so that newborns
-			// registered in their birth year get a valid age band (0-4).
-			if ageBand, ageErr := domain.GeneralizeAge(birthDate, occurredAt); ageErr == nil {
-				snapshot.AgeBand = ageBand
-			}
+	// The quasi-identifiers arrive ALREADY generalized from social-care: an age
+	// band label, a sex, and an IBGE mesoregion. This service no longer derives
+	// them, because deriving them would require receiving birthDate and CEP —
+	// both PII, and both things this service promises never to hold.
+	//
+	// Empty stays empty on purpose. An absent age band must not become a
+	// category: "unknown" and "0-4" are different facts, and collapsing them
+	// would quietly bias every demographic indicator.
+	if evt.AgeBand != "" {
+		if band, ok := domain.AgeBandFromLabel(evt.AgeBand); ok {
+			snapshot.AgeBand = band
+		} else {
+			return AnonymizedRecord{}, fmt.Errorf("%w: unknown age band %q", ErrAnonymizationFailed, evt.AgeBand)
 		}
 	}
 
-	snapshot.Sex = mapSex(evt.Sex) // defaults to SexUnknown for empty string
+	snapshot.Sex = mapSex(evt.Sex) // empty -> SexUnknown
 
-	if evt.CEP != "" {
-		geo, geoErr := a.geo.FindByCEP(evt.CEP)
-		if geoErr == nil {
-			snapshot.Geography = geo
-		} else if !errors.Is(geoErr, domain.ErrCEPNotFound) {
-			// CEP format errors (wrong length, non-digit) are real data issues —
-			// not found is graceful (unmapped CEP), but format errors should not
-			// silently produce empty geography.
-			return AnonymizedRecord{}, fmt.Errorf("%w: CEP validation: %v", ErrAnonymizationFailed, geoErr)
+	if evt.MesoregionCode != "" {
+		snapshot.Geography = domain.Geography{
+			MesoregionCode: domain.MesoregionCode(evt.MesoregionCode),
+			MesoregionName: evt.MesoregionName,
+			StateCode:      evt.StateCode,
 		}
-	}
-
-	if evt.TotalIncomeCents != nil {
-		snapshot.IncomeBand = domain.GeneralizeIncome(*evt.TotalIncomeCents)
 	}
 
 	return AnonymizedRecord{
@@ -462,13 +454,25 @@ func (a *Anonymizer) anonymizeGenericAssessment(eventType domain.EventType, data
 // ---------------------------------------------------------------------------
 
 // mapSex converts a raw sex string to domain.Sex.
+// mapSex maps the producer's vocabulary onto this service's.
+//
+// social-care emits the rawValue of its Swift `PersonalData.Sex` enum, which is
+// Portuguese and lowercase. The previous version matched only "MALE"/"FEMALE",
+// so every event would have collapsed to SexUnknown even once sex started being
+// sent — a silent bias that no field-level contract check would have caught,
+// because the field name matched and only the VALUES disagreed.
+//
+// The English forms are kept for tolerance; anything unrecognized is Unknown,
+// never a guess.
 func mapSex(raw string) domain.Sex {
 	switch raw {
-	case "MALE":
+	case "masculino", "MALE":
 		return domain.SexMale
-	case "FEMALE":
+	case "feminino", "FEMALE":
 		return domain.SexFemale
 	default:
+		// "outro" included: a third category would need its own dimension value
+		// and a decision about k-anonymity, which does not exist yet.
 		return domain.SexUnknown
 	}
 }
