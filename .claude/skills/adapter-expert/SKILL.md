@@ -18,36 +18,45 @@ You are the infrastructure layer specialist. This layer connects domain and inge
 ```
 internal/api/
   router.go         -- chi.NewRouter(), middleware chain, route groups
+  ports.go          -- interfaces the API layer depends on
   response.go       -- standard response envelope
   middleware/
-    jwt.go          -- JWT verification middleware
-    rate_limit.go   -- per-IP and per-key rate limiting
-    security.go     -- security headers middleware
-    cors.go         -- CORS middleware
-    logging.go      -- structured request logging
+    jwt_auth.go        -- JWT verification middleware
+    jwks_validator.go  -- JWKS fetch/cache, RS256-only validation
+    role_guard.go      -- RBAC on the `groups` claim (<system>:<role>)
+    rate_limit.go      -- per-IP and per-key rate limiting
+    security_headers.go -- security headers middleware
+    recovery.go        -- panic recovery (the one place panics are caught)
+    response.go        -- middleware-level error responses
   handlers/
     indicators.go   -- GET /api/v1/indicators/*
     export.go       -- GET /api/v1/export/{format}
     metadata.go     -- GET /api/v1/metadata/*
     health.go       -- GET /health, GET /ready
+    response.go     -- handler-level response helpers
 
 internal/store/
-  postgres.go       -- pgx pool setup, connection config
+  store.go          -- pgx pool setup, connection config
+  schema.go         -- star-schema DDL
+  migrations.go     -- forward-only migrations (a FILE, not a directory)
   dimensions.go     -- dimension table operations
   facts.go          -- fact table operations (upsert, insert)
   indicators.go     -- aggregation queries for indicators
-  migrations/       -- embedded SQL migration files
-  event_log.go      -- event_processing_log, event_dlq
+  views.go          -- SQL views
+  carryforward.go   -- monthly carry-forward job
+  event_id.go       -- event identity/dedup helpers
+  event_store.go    -- event_processing_log, event_dlq
 
-internal/export/
-  encoder.go        -- Encoder interface
+internal/export/          -- ALL encoders are stdlib; no external libs (see
+  encoder.go              -- export-pipeline-expert). Do not `go get` here.
   csv.go            -- CSV encoder
-  json.go           -- JSON encoder
+  json_encoder.go   -- JSON encoder
   xml.go            -- XML encoder
-  parquet.go        -- Parquet encoder (segmentio/parquet-go)
-  dbf.go            -- DBF encoder (go-dbf)
-  dbc.go            -- DBC encoder (LZ77 compressed DBF)
-  ods.go            -- ODS encoder (excelize or manual XML)
+  parquet.go        -- Parquet encoder (hand-rolled: bytes + encoding/binary)
+  dbf.go            -- DBF encoder (hand-rolled: dBASE III byte layout)
+  dbc.go            -- DBC encoder (DBF + compress/flate deflate)
+  ods.go            -- ODS encoder (archive/zip + XML by hand)
+  fhir_encoder.go   -- FHIR Bundle encoder entrypoint
   fhir/
     bundle.go       -- FHIR Bundle (type=collection)
     patient.go      -- BRCorePatient (anonymized)

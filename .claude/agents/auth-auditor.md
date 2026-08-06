@@ -18,7 +18,7 @@ Find and analyze ALL files related to authentication and authorization:
 - `internal/api/router.go` -- middleware chain, route protection
 - `internal/api/handlers/` -- auth guards on each endpoint
 - `configs/config.go` -- JWKS config, API key config
-- `internal/ingestion/consumer.go` -- NATS authentication
+- `internal/ingestion/nats_consumer.go` -- NATS authentication
 
 ## Audit Checklist
 

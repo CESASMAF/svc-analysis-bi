@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `svc-analysis-bi` is a **descriptive analytics service** (Go) for ACDG Brasil. It consumes domain events from `svc-social-care` via NATS JetStream, anonymizes PII, materializes data into a PostgreSQL star schema, and exposes REST endpoints for indicators and multi-format exports.
 
-**Status:** Scaffold/template project — ADR, handbook, agents, and skills are defined; source code implementation follows the TDD pipeline.
+**Status:** Implemented. `internal/` has 80 `.go` files (28 of them tests) covering domain, ingestion, store, api/middleware, api/handlers and export. Treat existing code as the source of truth — read before writing, and do not scaffold over what is already there.
 
 ## Stack
 
@@ -14,9 +14,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **chi** — HTTP router
 - **pgx v5** — PostgreSQL driver (dedicated analytical instance)
 - **nats.go** — NATS JetStream consumer (durable, at-least-once)
-- **Export:** CSV/JSON/XML (stdlib), Parquet (segmentio/parquet-go), DBF (go-dbf), DBC (LZ77/CGo), ODS (excelize), FHIR Bundle (manual BR Core structs)
+- **Export:** all 8 formats are **stdlib only, hand-rolled** in `internal/export/` — CSV/JSON/XML, Parquet (`bytes`+`encoding/binary`), DBF (dBASE III byte layout), DBC (DBF + `compress/flate`), ODS (`archive/zip`), FHIR Bundle (manual BR Core structs). `go.mod` has exactly three direct requires: chi, pgx, nats.go. **No encoding library is a dependency — do not add one** (`CGO_ENABLED=0` + `FROM scratch` also rules out CGo).
 
-## Commands (when go.mod exists)
+## Commands
 
 ```bash
 go build ./cmd/server/          # Build
@@ -49,9 +49,10 @@ internal/
   store/                        — pgx repositories, dimension/fact CRUD, migrations
   api/                          — chi router, handlers, middleware (JWT, rate limit, security headers)
   export/                       — 8 format encoders implementing a shared Encoder interface
-configs/                        — env parsing, IBGE mesoregion CSV
-migrations/                     — forward-only SQL
+configs/                        — env parsing, IBGE mesoregion CSV (embedded via go:embed)
 ```
+
+Migrations are **not** a top-level directory: they live in `internal/store/migrations.go` + `schema.go` (forward-only, in Go).
 
 ### Key Design Decisions (ADR-001)
 
@@ -84,20 +85,11 @@ Response envelope: `{ "data": [...], "meta": { timestamp, period, k_threshold, s
 - Table-driven tests with subtests as default pattern.
 - Domain layer is pure — no I/O, no database imports.
 
-## Multi-Agent Pipeline
+## Implementation order
 
-Implementation follows a fail-first pipeline via `.pipeline/<ticket>/` folders:
-
-1. `domain-architect` → type contracts (001-contracts/)
-2. `test-writer` → failing tests from contracts only (002-tests/)
-3. `domain-modeler` → pure domain logic (003-domain/ + src)
-4. `application-orchestrator` → ingestion pipeline wiring (003-application/ + src)
-5. `infra-implementer` → HTTP, pgx, NATS adapter, exports (003-infra/ + src)
-6. `code-reviewer` → architectural audit (004-code-review/)
-7. `go-quality-checker` → Go idioms audit (005-ts-quality/)
-8. `integration-validator` → build + test + race (006-integration/)
-
-Each agent writes a `REPORT.md` with a Public API section consumed by downstream agents. Max 3 review rounds before user escalation. One ticket = one atomic unit.
+Fail-first: contracts → failing tests → pure domain → ingestion wiring → infra
+(HTTP, pgx, NATS, exports) → review. Specialized agents for each step live in
+`.claude/agents/`; invoke them explicitly when a change spans several layers.
 
 ## Compliance
 

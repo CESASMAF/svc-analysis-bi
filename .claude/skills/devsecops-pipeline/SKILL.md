@@ -20,32 +20,48 @@ user_invocable: true
 - Regular `go get -u` for patch updates
 
 ### 2. Docker Security
+
+**This service runs on `FROM scratch`, not distroless.** Audit against the shape
+below — it is the project's actual `Dockerfile`, and it is the intended design.
+
 ```dockerfile
-# Required patterns:
-FROM golang:1.23-alpine AS build
+FROM golang:1.25-alpine AS builder
+RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN go mod download && go mod verify
+RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /server ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/svc-analysis-bi ./cmd/server/
 
-FROM gcr.io/distroless/static-debian12
-COPY --from=build /server /server
-COPY --from=build /app/configs/ibge_mesoregions.csv /configs/
-USER nonroot:nonroot
-HEALTHCHECK --interval=30s --timeout=3s CMD ["/server", "-health"]
-ENTRYPOINT ["/server"]
+FROM scratch
+LABEL org.opencontainers.image.source="..."
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /bin/svc-analysis-bi /bin/svc-analysis-bi
+EXPOSE 8080
+ENTRYPOINT ["/bin/svc-analysis-bi"]
 ```
 
+**Three things you must NOT flag as findings here** — `scratch` makes each one
+either impossible or unnecessary, and reporting them argues against the more
+secure choice:
+
+| Not a finding | Why |
+|---|---|
+| No `USER nonroot:nonroot` | `scratch` has no `/etc/passwd`, so there is no user to switch to. The runtime enforces non-root (`runAsNonRoot` / `--user`), not the image. |
+| No `HEALTHCHECK` | `HEALTHCHECK` needs a shell or a probe binary; `scratch` has neither. Liveness/readiness come from `GET /health` and `/ready` at the orchestrator. |
+| No `COPY configs/ibge_mesoregions.csv` | The CSV is compiled into the binary via `go:embed` (`configs/embed.go`). Copying it would be dead weight; `GEO_CSV_PATH` overrides at runtime if ever needed. |
+
 Checklist:
-- [ ] Base image pinned (not `:latest`)
-- [ ] Non-root USER directive (distroless nonroot or explicit)
+- [ ] Base image pinned (not `:latest`) — builder is `golang:1.25-alpine`
+- [ ] Minimal runtime — `FROM scratch` (no shell, no package manager, no user db)
 - [ ] Multi-stage build (builder + minimal runtime)
-- [ ] CGO_ENABLED=0 for static binary (unless DBC needs CGo)
+- [ ] `CGO_ENABLED=0` — **mandatory**, not conditional: a cgo-linked binary will
+      not run on `scratch`. This is what rules out CGo for the DBC encoder.
+- [ ] CA certificates copied from the builder (needed for outbound TLS)
 - [ ] No secrets in ENV/ARG
-- [ ] `.dockerignore` excludes `.env`, `.git`, `vendor/`, `*_test.go`
-- [ ] HEALTHCHECK defined
 - [ ] Binary stripped (`-ldflags="-s -w"`)
+- [ ] **GAP:** no `.dockerignore` in the repo — `COPY . .` ships `.git/` and
+      `*_test.go` into the build context. This one IS a real finding.
 
 ### 3. CI/CD Pipeline (GitHub Actions)
 - [ ] Actions pinned by SHA (not tag)

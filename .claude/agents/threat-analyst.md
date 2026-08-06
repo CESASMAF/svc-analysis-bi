@@ -44,8 +44,8 @@ To build the DFD, analyze:
 - `internal/api/middleware/` -- auth chain
 - `internal/api/handlers/` -- HTTP handlers
 - `internal/store/` -- data stores (pgx)
-- `internal/ingestion/consumer.go` -- NATS consumer (PII ingestion point)
-- `internal/ingestion/anonymize.go` -- anonymization pipeline (critical trust boundary)
+- `internal/ingestion/nats_consumer.go` -- NATS consumer (PII ingestion point)
+- `internal/ingestion/anonymizer.go` -- anonymization pipeline (critical trust boundary)
 - `internal/export/` -- 8 format encoders (data egress points)
 - `internal/export/fhir/` -- FHIR Bundle generation
 - `configs/config.go` -- configuration and secrets
