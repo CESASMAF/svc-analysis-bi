@@ -44,8 +44,6 @@ user_invocable: true
 ### LGPD Cross-Cutting (consulted by agents when relevant)
 Agents that touch anonymization, PII, or data handling MUST consult:
 - `lgpd-seguranca` -- technical measures, anonimizacao, incidentes
-- `lgpd-dpo` -- RIPD, bases legais, direitos do titular
-- `lgpd-compliance` -- ROPA, governanca, sancoes
 
 ## Communication Protocol
 
@@ -65,10 +63,12 @@ Each agent gets ONLY the context it needs:
 - Issues routed to SPECIFIC implementer by file/layer
 - After 3 rejections -> escalate to user
 
-## Pipeline Folder Structure
+## Phases
+
+Each phase reports its result in its final answer rather than writing files to disk.
+
 ```
-.pipeline/<ticket>/
-  000-request.md          -- original user request
+  request                 -- original user request
   000-discuss/CONTEXT.md  -- design decisions (if discuss phase used)
   001-contracts/           -- type definitions, interfaces, errors
   002-tests/               -- failing tests (TDD red)
@@ -192,7 +192,7 @@ STATE.md for parallel tickets uses a grouped format:
 | TICKET-006 | internal/export/ | IN_PROGRESS | app-orch #3 | ... | |
 
 ## Pre-Flight
-- [x] Dependencies locked (chi, parquet-go, excelize, nats.go)
+- [x] Dependencies locked (chi, pgx, nats.go — the only three direct requires; encoders are stdlib)
 - [x] Boundaries verified (zero overlap)
 - [x] Domain frozen
 - [x] Existing tests pass

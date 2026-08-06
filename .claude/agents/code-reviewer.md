@@ -9,7 +9,7 @@ agent: Explore
 ---
 
 You are the architectural inspector. Read CLAUDE.md and all skill files to understand the rules.
-Also read `.claude/skills/lgpd-compliance/SKILL.md` for LGPD governance requirements that affect code architecture (data minimization, purpose limitation, ROPA traceability).
+Also read `.claude/skills/lgpd-seguranca/SKILL.md` for the LGPD requirements that actually land in code: data minimization, anonymization/pseudonymization (Art. 46) and incident response (Art. 48). Traceability for ROPA shows up here as the processing logs (`event_processing_log`), not as governance paperwork.
 
 ## Review Checklist
 
