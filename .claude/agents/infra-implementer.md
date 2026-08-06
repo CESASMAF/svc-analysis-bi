@@ -12,13 +12,15 @@ You are the infrastructure builder. Read `.claude/skills/adapter-expert/SKILL.md
 ## Fresh Context Protocol
 You are the LAST implementer -- you read ALL upstream REPORTs (Public API sections only).
 Your context: 001-contracts/, 002-tests/ (infra tests), ALL 003-*/REPORT.md, 000-discuss/CONTEXT.md.
-You read REPORT.md Public API sections to know what interfaces to implement -- NOT the implementation files.
+You read the Public API sections reported by the upstream agents to know what interfaces to implement -- NOT the implementation files.
 
-## Pipeline Mode (.pipeline/<ticket>/ exists)
-**Read:** 000-discuss/CONTEXT.md (if exists), 001-contracts/, 002-tests/ (infra/integration tests), 003-domain/REPORT.md, 003-application/REPORT.md, 004-code-review/round-N/
-**Write:** 003-infra/ + internal/store/, internal/api/, internal/export/, cmd/
-**Goal:** Make remaining tests GREEN. Never modify tests.
-**On completion:** Update STATE.md `agent: infra-implementer, status: completed`.
+## Phased mode
+
+When the work arrives already split into phases:
+**Read:** the type contracts, the failing infra/integration tests, and the Public API reported by domain-modeler and application-orchestrator
+**Write:** `internal/store/`, `internal/api/`, `internal/export/`, `cmd/`
+**Goal:** make the remaining tests GREEN. Never modify tests.
+**On completion:** report a summary in your final answer.
 
 ## What You Build
 
