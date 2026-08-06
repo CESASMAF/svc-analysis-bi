@@ -2,7 +2,7 @@
 name: auth-auditor
 description: >
   Agente especialista em auditoria de autenticacao, autorizacao e sessao.
-  Verifica implementacao de JWT, OIDC (Zitadel), API key validation,
+  Verifica implementacao de JWT, OIDC, API key validation,
   e account security features.
   Segue a skill auth-session-security. Produz REPORT.md com compliance status.
 context: fork
@@ -62,4 +62,6 @@ Include: Executive Summary, Compliance Matrix, Critical Findings, Positive Findi
 ## Rules
 - Read-only analysis. Never modify auth code.
 - Provide concrete Go code examples for fixes.
-- Reference Zitadel OIDC specifics (claim paths, JWKS format).
+- Nunca nomeie o IdP neste arquivo. Para claim paths, formato do JWKS e
+  issuer, leia `.claude/skills/auth-session-security/SKILL.md` -- e a unica
+  fonte que nomeia o produto, e o codigo (`internal/api/middleware/`) manda.

@@ -9,6 +9,27 @@ user_invocable: true
 
 # Auth & Session Security -- Go / chi + Authentik OIDC
 
+> ## Este arquivo e o UNICO que nomeia o IdP
+>
+> Os agents de security (`auth-auditor`, `pentest-scanner`, `threat-analyst`,
+> `security-orchestrator`) referenciam esta skill e **nunca repetem o nome do
+> produto**. A regra existe porque a alternativa ja falhou: os quatro passaram
+> meses dizendo "Zitadel" enquanto o codigo estava em Authentik, e o
+> `auth-auditor` chegava a mandar ler esta skill na primeira linha e a
+> contradizer na propria description.
+>
+> **Estado verificado (2026-08-06):** Authentik. Ancoras no codigo --
+> `internal/api/middleware/jwks_validator.go` (RS256-only + JWKS),
+> `role_guard.go` (claim `groups` no formato `<system>:<role>`, mais
+> `superadmin`), e `.env.example` (`JWKS_URL`, `AUTH_ISSUER` apontando
+> `/application/o/<slug>/`).
+>
+> **O workspace esta migrando para Ory** (Kratos + Hydra + Cerbos): `infra` e
+> `app-conecta-web` ja estao la, `svc-people-context` migrou o provisionamento.
+> Este servico ainda **nao**. Quando migrar, os dois pontos de quebra sao o
+> RS256-only + JWKS de `jwks_validator.go` e o formato da claim `groups` em
+> `role_guard.go` -- e este arquivo e o unico que precisa ser reescrito.
+
 ## JWT Verification
 
 ### Required Claims
