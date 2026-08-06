@@ -47,6 +47,16 @@ func (a *Anonymizer) Anonymize(ctx context.Context, eventType domain.EventType, 
 		return a.anonymizeFamilyMemberRemoved(data)
 	case domain.EventPrimaryCaregiverAssigned:
 		return a.anonymizeCaregiverAssigned(data)
+	case domain.EventPatientAdmitted:
+		return a.anonymizeLifecycle(data, domain.EventPatientAdmitted, domain.LifecycleAdmitted)
+	case domain.EventPatientDischarged:
+		return a.anonymizeLifecycle(data, domain.EventPatientDischarged, domain.LifecycleDischarged)
+	case domain.EventPatientReadmitted:
+		return a.anonymizeLifecycle(data, domain.EventPatientReadmitted, domain.LifecycleReadmitted)
+	case domain.EventPatientWithdrawnFromWaitlist:
+		return a.anonymizeLifecycle(data, domain.EventPatientWithdrawnFromWaitlist, domain.LifecycleWithdrawn)
+	case domain.EventPatientPIIAnonymized:
+		return a.acknowledgePIIAnonymized(data)
 	case domain.EventSocialIdentityUpdated,
 		domain.EventHousingConditionUpdated,
 		domain.EventSocioEconomicUpdated,
@@ -525,4 +535,78 @@ func unmarshalEvent(data []byte, v any) error {
 		return json.Unmarshal(data, v)
 	}
 	return err
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle (admitted / discharged / readmitted / withdrawn)
+// ---------------------------------------------------------------------------
+
+func (a *Anonymizer) anonymizeLifecycle(
+	data []byte, eventType domain.EventType, status domain.LifecycleStatus,
+) (AnonymizedRecord, error) {
+	var evt jsonLifecycle
+	if err := unmarshalEvent(data, &evt); err != nil {
+		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
+	}
+
+	if evt.PatientID == "" || evt.ID == "" {
+		return AnonymizedRecord{}, fmt.Errorf("%w: missing required fields", ErrAnonymizationFailed)
+	}
+
+	hash, err := domain.HashPatientID(evt.PatientID, a.salt)
+	if err != nil {
+		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrAnonymizationFailed, err)
+	}
+
+	occurredAt, err := time.Parse(time.RFC3339, evt.OccurredAt)
+	if err != nil {
+		return AnonymizedRecord{}, fmt.Errorf("%w: invalid occurredAt: %v", ErrDeserializationFailed, err)
+	}
+
+	return AnonymizedRecord{
+		Kind:        FactKindLifecycle,
+		EventID:     evt.ID,
+		EventType:   eventType,
+		OccurredAt:  occurredAt,
+		Period:      domain.PeriodFromTime(occurredAt),
+		PatientHash: hash,
+		Lifecycle:   &LifecyclePayload{Status: status, Reason: evt.Reason},
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// PII anonymized on the source side — acknowledged, no effect
+// ---------------------------------------------------------------------------
+
+// acknowledgePIIAnonymized recognizes the erasure event and materializes nothing.
+//
+// See docs/adr/ADR-002-pii-anonymized-noop.md for the reasoning. In short: this
+// service never held the erased data — patient identity is a salted one-way
+// hash and everything else is generalized — so there is nothing here to erase.
+//
+// It is handled explicitly rather than left to the default branch because those
+// are not the same thing. Falling through to the DLQ would record "unknown
+// event type", which is what an unhandled bug looks like. A decision to do
+// nothing should be visible as a decision.
+func (a *Anonymizer) acknowledgePIIAnonymized(data []byte) (AnonymizedRecord, error) {
+	var evt jsonEventBase
+	if err := unmarshalEvent(data, &evt); err != nil {
+		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
+	}
+
+	occurredAt, err := time.Parse(time.RFC3339, evt.OccurredAt)
+	if err != nil {
+		return AnonymizedRecord{}, fmt.Errorf("%w: invalid occurredAt: %v", ErrDeserializationFailed, err)
+	}
+
+	slog.Info("erasure acknowledged upstream; no local data to erase",
+		"eventId", evt.ID, "eventType", domain.EventPatientPIIAnonymized)
+
+	return AnonymizedRecord{
+		Kind:       FactKindNone,
+		EventID:    evt.ID,
+		EventType:  domain.EventPatientPIIAnonymized,
+		OccurredAt: occurredAt,
+		Period:     domain.PeriodFromTime(occurredAt),
+	}, nil
 }

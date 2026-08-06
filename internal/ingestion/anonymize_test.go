@@ -221,10 +221,10 @@ func TestAnonymize_PIIFieldsAbsent(t *testing.T) {
 	anonymizer := NewAnonymizer(geoLookup, salt)
 
 	piiFields := []struct {
-		name       string
-		eventType  domain.EventType
-		rawEvent   []byte
-		piiValues  []string
+		name      string
+		eventType domain.EventType
+		rawEvent  []byte
+		piiValues []string
 	}{
 		{
 			name:      "actorId absent from appointment",
@@ -257,13 +257,13 @@ func TestAnonymize_PIIFieldsAbsent(t *testing.T) {
 			name:      "victimId absent from violation",
 			eventType: domain.EventRightsViolationReported,
 			rawEvent: mustJSON(map[string]any{
-				"id":             "evt-pii-victim",
-				"occurredAt":     "2025-06-15T10:00:00Z",
-				"actorId":        "actor-001",
-				"patientId":      "pat-pii-victim",
-				"reportId":       "report-uuid-must-vanish",
-				"victimId":       "victim-uuid-must-vanish",
-				"violationType":  "neglect",
+				"id":            "evt-pii-victim",
+				"occurredAt":    "2025-06-15T10:00:00Z",
+				"actorId":       "actor-001",
+				"patientId":     "pat-pii-victim",
+				"reportId":      "report-uuid-must-vanish",
+				"victimId":      "victim-uuid-must-vanish",
+				"violationType": "neglect",
 			}),
 			piiValues: []string{"victim-uuid-must-vanish", "report-uuid-must-vanish"},
 		},
@@ -271,11 +271,11 @@ func TestAnonymize_PIIFieldsAbsent(t *testing.T) {
 			name:      "caregiverId absent from caregiver assigned",
 			eventType: domain.EventPrimaryCaregiverAssigned,
 			rawEvent: mustJSON(map[string]any{
-				"id":           "evt-pii-caregiver",
-				"occurredAt":   "2025-06-15T10:00:00Z",
-				"actorId":      "actor-001",
-				"patientId":    "pat-pii-caregiver",
-				"caregiverId":  "caregiver-uuid-must-vanish",
+				"id":          "evt-pii-caregiver",
+				"occurredAt":  "2025-06-15T10:00:00Z",
+				"actorId":     "actor-001",
+				"patientId":   "pat-pii-caregiver",
+				"caregiverId": "caregiver-uuid-must-vanish",
 			}),
 			piiValues: []string{"caregiver-uuid-must-vanish"},
 		},
@@ -446,4 +446,106 @@ func mustJSON(v any) []byte {
 		panic("mustJSON: " + err.Error())
 	}
 	return data
+}
+
+// ---------------------------------------------------------------------------
+// Test: care-pathway lifecycle (ADR-002)
+// ---------------------------------------------------------------------------
+
+func TestAnonymize_LifecycleTransitions(t *testing.T) {
+	anonymizer := NewAnonymizer(newFakeGeographyLookup(), "test-salt")
+
+	for _, tt := range []struct {
+		name       string
+		eventType  domain.EventType
+		reason     string
+		wantStatus domain.LifecycleStatus
+		wantReason string
+	}{
+		{"admitted", domain.EventPatientAdmitted, "", domain.LifecycleAdmitted, ""},
+		{"discharged", domain.EventPatientDischarged, "objetivos alcancados", domain.LifecycleDischarged, "objetivos alcancados"},
+		{"readmitted", domain.EventPatientReadmitted, "", domain.LifecycleReadmitted, ""},
+		{"withdrawn", domain.EventPatientWithdrawnFromWaitlist, "mudanca de municipio", domain.LifecycleWithdrawn, "mudanca de municipio"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			evt := mustJSON(map[string]any{
+				"id":         "evt-lc-" + tt.name,
+				"occurredAt": "2025-06-15T10:00:00Z",
+				"actorId":    "actor-001",
+				"patientId":  "pat-lc",
+				"personId":   "person-lc",
+				"reason":     tt.reason,
+			})
+
+			rec, err := anonymizer.Anonymize(context.Background(), tt.eventType, evt)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rec.Kind != FactKindLifecycle {
+				t.Errorf("Kind = %q, want %q", rec.Kind, FactKindLifecycle)
+			}
+			if rec.Lifecycle == nil {
+				t.Fatal("expected Lifecycle payload")
+			}
+			if rec.Lifecycle.Status != tt.wantStatus {
+				t.Errorf("Status = %q, want %q", rec.Lifecycle.Status, tt.wantStatus)
+			}
+			if rec.Lifecycle.Reason != tt.wantReason {
+				t.Errorf("Reason = %q, want %q", rec.Lifecycle.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestAnonymize_LifecycleNeverCarriesNotes(t *testing.T) {
+	anonymizer := NewAnonymizer(newFakeGeographyLookup(), "test-salt")
+
+	// `notes` is free text written by a caseworker and may name people. The
+	// event carries it; this service must not surface it anywhere in the record.
+	secret := "mae relatou violencia domestica na rua das Flores 123"
+	evt := mustJSON(map[string]any{
+		"id":         "evt-lc-notes",
+		"occurredAt": "2025-06-15T10:00:00Z",
+		"actorId":    "actor-001",
+		"patientId":  "pat-lc",
+		"personId":   "person-lc",
+		"reason":     "encaminhado",
+		"notes":      secret,
+	})
+
+	rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientDischarged, evt)
+	if err != nil {
+		t.Fatalf("an unknown field must not break ingestion: %v", err)
+	}
+
+	recJSON, _ := json.Marshal(rec)
+	if strings.Contains(string(recJSON), "violencia") || strings.Contains(string(recJSON), "Flores") {
+		t.Error("free-text notes leaked into the anonymized record")
+	}
+}
+
+func TestAnonymize_PIIAnonymizedIsAcknowledgedNotDropped(t *testing.T) {
+	anonymizer := NewAnonymizer(newFakeGeographyLookup(), "test-salt")
+
+	// ADR-002: this service holds nothing to erase, so the event has no effect.
+	// But it must be RECOGNIZED — falling through to the default branch would
+	// report "unknown event type", which is indistinguishable from a bug.
+	evt := mustJSON(map[string]any{
+		"id":         "evt-erasure",
+		"occurredAt": "2025-06-15T10:00:00Z",
+		"actorId":    "actor-001",
+		"patientId":  "pat-erased",
+		"personId":   "person-erased",
+	})
+
+	rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientPIIAnonymized, evt)
+	if err != nil {
+		t.Fatalf("erasure event must be recognized, got: %v", err)
+	}
+	if rec.Kind != FactKindNone {
+		t.Errorf("Kind = %q, want %q", rec.Kind, FactKindNone)
+	}
+	if rec.Snapshot != nil || rec.Lifecycle != nil {
+		t.Error("erasure event must not materialize any payload")
+	}
 }

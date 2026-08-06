@@ -42,7 +42,6 @@ type jsonPatientCreated struct {
 	MesoregionCode string `json:"mesoregionCode"` // IBGE
 	MesoregionName string `json:"mesoregionName"`
 	StateCode      string `json:"stateCode"`
-
 }
 
 // NOTE — lacuna conhecida (auditoria 2026-08-06). Esta struct declarava
@@ -113,4 +112,16 @@ type jsonGenericAssessment struct {
 	jsonEventBase
 	Before json.RawMessage `json:"before"`
 	After  json.RawMessage `json:"after"`
+}
+
+// jsonLifecycle reads a care-pathway transition.
+//
+// `notes` is absent BY DESIGN. The source events (Discharged, Readmitted,
+// Withdrawn) carry a free-text `notes` written by a caseworker, which can name
+// people, addresses or conditions. Declaring the field — even unused — would
+// make it one edit away from being persisted. `reason` is categorical and safe.
+type jsonLifecycle struct {
+	jsonEventBase
+	PersonID string `json:"personId"`
+	Reason   string `json:"reason"`
 }
