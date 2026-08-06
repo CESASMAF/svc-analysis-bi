@@ -1,10 +1,13 @@
 package ingestion
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/acdgbrasil/svc-analysis-bi/internal/domain"
@@ -66,7 +69,7 @@ func (a *Anonymizer) Anonymize(ctx context.Context, eventType domain.EventType, 
 
 func (a *Anonymizer) anonymizePatientCreated(data []byte) (AnonymizedRecord, error) {
 	var evt jsonPatientCreated
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -137,7 +140,7 @@ func (a *Anonymizer) anonymizePatientCreated(data []byte) (AnonymizedRecord, err
 
 func (a *Anonymizer) anonymizeHealthStatus(data []byte) (AnonymizedRecord, error) {
 	var evt jsonAssessmentUpdated
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -187,7 +190,7 @@ func (a *Anonymizer) anonymizeHealthStatus(data []byte) (AnonymizedRecord, error
 
 func (a *Anonymizer) anonymizeAppointment(data []byte) (AnonymizedRecord, error) {
 	var evt jsonAppointmentRegistered
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -226,7 +229,7 @@ func (a *Anonymizer) anonymizeAppointment(data []byte) (AnonymizedRecord, error)
 
 func (a *Anonymizer) anonymizeReferral(data []byte) (AnonymizedRecord, error) {
 	var evt jsonReferralCreated
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -265,7 +268,7 @@ func (a *Anonymizer) anonymizeReferral(data []byte) (AnonymizedRecord, error) {
 
 func (a *Anonymizer) anonymizeViolation(data []byte) (AnonymizedRecord, error) {
 	var evt jsonRightsViolationReported
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -304,7 +307,7 @@ func (a *Anonymizer) anonymizeViolation(data []byte) (AnonymizedRecord, error) {
 
 func (a *Anonymizer) anonymizeFamilyMemberAdded(data []byte) (AnonymizedRecord, error) {
 	var evt jsonFamilyMemberAdded
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -345,7 +348,7 @@ func (a *Anonymizer) anonymizeFamilyMemberAdded(data []byte) (AnonymizedRecord, 
 
 func (a *Anonymizer) anonymizeFamilyMemberRemoved(data []byte) (AnonymizedRecord, error) {
 	var evt jsonFamilyMemberRemoved
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -385,7 +388,7 @@ func (a *Anonymizer) anonymizeFamilyMemberRemoved(data []byte) (AnonymizedRecord
 
 func (a *Anonymizer) anonymizeCaregiverAssigned(data []byte) (AnonymizedRecord, error) {
 	var evt jsonPrimaryCaregiverAssigned
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -423,7 +426,7 @@ func (a *Anonymizer) anonymizeCaregiverAssigned(data []byte) (AnonymizedRecord, 
 
 func (a *Anonymizer) anonymizeGenericAssessment(eventType domain.EventType, data []byte) (AnonymizedRecord, error) {
 	var evt jsonGenericAssessment
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -470,14 +473,52 @@ func mapSex(raw string) domain.Sex {
 	}
 }
 
-// unmarshalStrict performs JSON unmarshalling and returns an error if the
+// unmarshalEvent performs JSON unmarshalling and returns an error if the
 // input is empty, null, or malformed.
-func unmarshalStrict(data []byte, v any) error {
+// unmarshalEvent decodes an inbound event payload.
+//
+// It is deliberately TOLERANT of unknown fields and only WARNS about them.
+// Rejecting would be wrong here: this is the consumer end of an event stream,
+// and the producer must be able to add a field without taking the consumer
+// down. Fail-closed on unknown fields would turn "social-care shipped a new
+// attribute" into "analysis-bi stopped ingesting everything".
+//
+// The warning is the point. An unknown field is the earliest signal that the
+// contract moved, and it is the only one visible at runtime.
+//
+// What this canNOT catch is a MISSING field — JSON omission is indistinguishable
+// from a zero value, so it stays silent no matter how strict the decoder is.
+// That asymmetry is exactly how `birthDate`, `sex` and `cep` were absent from
+// PatientCreatedEvent for months while every test stayed green (audit
+// 2026-08-06). Omission is caught by `scripts/check-event-contract.py`, which
+// compares the Swift structs the producer emits against the Go structs read
+// here. Runtime is tolerant; CI is strict.
+//
+// Renamed from `unmarshalEvent`: the old name promised rigor and delivered a
+// plain json.Unmarshal, which is worse than no check — it bought confidence
+// that was not earned.
+func unmarshalEvent(data []byte, v any) error {
 	if len(data) == 0 {
 		return fmt.Errorf("empty input")
 	}
 	if string(data) == "null" {
 		return fmt.Errorf("null input")
 	}
-	return json.Unmarshal(data, v)
+
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	err := dec.Decode(v)
+	if err == nil {
+		return nil
+	}
+
+	// Unknown field: warn and retry tolerantly. Any other error (type mismatch,
+	// malformed JSON) is a real failure and propagates.
+	if strings.Contains(err.Error(), "unknown field") {
+		slog.Warn("inbound event carries a field this service does not declare — the contract may have moved",
+			"detail", err.Error(),
+			"hint", "run scripts/check-event-contract.py")
+		return json.Unmarshal(data, v)
+	}
+	return err
 }
