@@ -22,11 +22,18 @@ Analyze the system architecture to identify threats BEFORE they become vulnerabi
 - **Go** API-only service with chi router
 - **PostgreSQL 15** via pgx (analytical star schema, no PII)
 - **NATS JetStream** for event consumption (events contain PII that gets anonymized)
-- **JWT auth** via Zitadel OIDC (API key or JWT for consumers)
+- **JWT auth** via OIDC (API key or JWT for consumers) -- o produto de IdP e
+  nomeado so em `auth-session-security`; nao o repita aqui
 - **8 export formats** including FHIR Bundle
 - **K-anonymity K=5** on all outputs
 - **No UI** -- pure API service
-- **Kubernetes (K3s)** deployment via Flux CD on edge hardware
+- **Docker Compose** deployment on a single production VPS -- **not Kubernetes**.
+  Verified in the `infra` repo (2026-08-06): `stack/compose.yml` (modular, via
+  `include:`) with **Caddy** as the single edge (auto-TLS + HTTP/3), an
+  `edge`/`app-net` network split, and a `tailnet` (Headscale) for admin access.
+  There is no K3s and no Flux CD anywhere in `infra/`. Model trust boundaries as
+  Compose networks and the Caddy edge -- not as namespaces, NetworkPolicies or
+  a GitOps reconciler.
 
 ## Execution Flow
 
