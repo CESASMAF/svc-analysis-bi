@@ -151,3 +151,16 @@ var (
 	ErrInvalidExportFormat = errors.New("invalid export format")
 	ErrInvalidDatasetScope = errors.New("invalid dataset scope")
 )
+
+// LifecycleStatus is where a patient stands in the care pathway.
+//
+// It is a small closed set on purpose: it comes from domain events, not from
+// free text, and it feeds a dimension that must stay countable.
+type LifecycleStatus string
+
+const (
+	LifecycleAdmitted   LifecycleStatus = "ADMITTED"
+	LifecycleDischarged LifecycleStatus = "DISCHARGED"
+	LifecycleReadmitted LifecycleStatus = "READMITTED"
+	LifecycleWithdrawn  LifecycleStatus = "WITHDRAWN"
+)

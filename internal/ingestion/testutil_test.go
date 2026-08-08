@@ -82,6 +82,10 @@ func (f *fakeFactStore) UpsertPatientSnapshot(ctx context.Context, rec Anonymize
 	return f.record("UpsertPatientSnapshot", rec)
 }
 
+func (f *fakeFactStore) UpdatePatientLifecycle(ctx context.Context, rec AnonymizedRecord) error {
+	return f.record("UpdatePatientLifecycle", rec)
+}
+
 func (f *fakeFactStore) IncrementDiagnosis(ctx context.Context, rec AnonymizedRecord) error {
 	return f.record("IncrementDiagnosis", rec)
 }

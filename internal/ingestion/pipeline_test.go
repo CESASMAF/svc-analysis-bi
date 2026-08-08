@@ -47,7 +47,6 @@ func TestPipeline_HappyPath_MessageFlowsThrough(t *testing.T) {
 		AnonymizedBufferSize: 10,
 		AnonymizeWorkers:     1,
 		MaterializeWorkers:   1,
-
 	}
 
 	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
@@ -121,7 +120,6 @@ func TestPipeline_HappyPath_MultipleMessages(t *testing.T) {
 		AnonymizedBufferSize: 10,
 		AnonymizeWorkers:     1,
 		MaterializeWorkers:   1,
-
 	}
 
 	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
@@ -171,7 +169,6 @@ func TestPipeline_UnknownEventType_SentToDLQ(t *testing.T) {
 		AnonymizedBufferSize: 10,
 		AnonymizeWorkers:     1,
 		MaterializeWorkers:   1,
-
 	}
 
 	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
@@ -237,7 +234,6 @@ func TestPipeline_DuplicateEvent_SkippedAndAcked(t *testing.T) {
 		AnonymizedBufferSize: 10,
 		AnonymizeWorkers:     1,
 		MaterializeWorkers:   1,
-
 	}
 
 	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
@@ -279,7 +275,6 @@ func TestPipeline_ContextCancellation_GracefulShutdown(t *testing.T) {
 		AnonymizedBufferSize: 10,
 		AnonymizeWorkers:     1,
 		MaterializeWorkers:   1,
-
 	}
 
 	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
@@ -343,7 +338,6 @@ func TestPipeline_AckOnlyAfterMaterialization(t *testing.T) {
 		AnonymizedBufferSize: 10,
 		AnonymizeWorkers:     1,
 		MaterializeWorkers:   1,
-
 	}
 
 	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
@@ -383,7 +377,6 @@ func TestPipeline_ConsumerConnectionError(t *testing.T) {
 		AnonymizedBufferSize: 10,
 		AnonymizeWorkers:     1,
 		MaterializeWorkers:   1,
-
 	}
 
 	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
@@ -417,7 +410,6 @@ func TestNewPipeline_ReturnsNonNil(t *testing.T) {
 		AnonymizedBufferSize: 10,
 		AnonymizeWorkers:     2,
 		MaterializeWorkers:   2,
-
 	}
 
 	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
@@ -635,5 +627,52 @@ func TestPipeline_TransientDLQError_LeavesMessageForRedelivery(t *testing.T) {
 
 	if ackTrack.ackCount() != 0 || termTrack.ackCount() != 0 {
 		t.Error("falha transitória no DLQ não pode consumir a mensagem: sem Ack e sem Term, para o NATS reentregar")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: acknowledged-but-inert event does NOT reach the DLQ (ADR-002)
+// ---------------------------------------------------------------------------
+
+func TestPipeline_PIIAnonymized_AcknowledgedNotDLQd(t *testing.T) {
+	eventStore := newFakeEventStore()
+	factStore := newFakeFactStore()
+	registry := NewEventHandlerRegistry(newFakeGeographyLookup(), "test-salt")
+	ackTrack := newAckTracker()
+
+	payload := []byte(`{"id":"evt-erasure-001","occurredAt":"2025-06-15T10:00:00Z","actorId":"actor-001","patientId":"pat-x","personId":"person-x"}`)
+
+	consumer := newFakeConsumer(RawMessage{
+		Subject: string(domain.EventPatientPIIAnonymized),
+		Data:    payload,
+		Ack:     ackTrack.ack,
+	})
+
+	cfg := PipelineConfig{
+		RawBufferSize:        10,
+		AnonymizedBufferSize: 10,
+		AnonymizeWorkers:     1,
+		MaterializeWorkers:   1,
+	}
+
+	pipeline := NewPipeline(cfg, consumer, registry, factStore, eventStore)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = pipeline.Run(ctx)
+
+	// The whole point of FactKindNone: a decision to do nothing must look
+	// different from an unhandled event. The DLQ is where unhandled goes.
+	if entries := eventStore.getDLQ(); len(entries) != 0 {
+		t.Errorf("erasure event must not reach the DLQ, got %d entries", len(entries))
+	}
+
+	// And it must not write a fact either — there is nothing to record.
+	if calls := factStore.getCalls(); len(calls) != 0 {
+		t.Errorf("erasure event must not materialize, got calls: %v", calls)
+	}
+
+	if ackTrack.ackCount() == 0 {
+		t.Error("expected Ack so NATS does not redeliver")
 	}
 }

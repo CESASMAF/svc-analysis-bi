@@ -312,6 +312,12 @@ func (p *pipeline) materialize(ctx context.Context, record AnonymizedRecord) err
 		return p.factStore.IncrementBenefit(ctx, record)
 	case FactKindFamilyComposition:
 		return p.factStore.UpsertFamilyComposition(ctx, record)
+	case FactKindLifecycle:
+		return p.factStore.UpdatePatientLifecycle(ctx, record)
+	case FactKindNone:
+		// Recognized event with no local effect (see acknowledgePIIAnonymized).
+		// Returning nil here is what keeps it out of the DLQ.
+		return nil
 	default:
 		return fmt.Errorf("%w: unknown fact kind %q", ErrMaterializationFailed, record.Kind)
 	}

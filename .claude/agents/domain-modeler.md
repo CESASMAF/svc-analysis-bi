@@ -17,13 +17,15 @@ You are spawned with ONLY the context you need. Do NOT explore unrelated pipelin
 Your context boundary: 001-contracts/, 002-tests/ (domain tests only), 000-discuss/CONTEXT.md (decisions).
 You MUST NOT read: 003-application/, 003-infra/.
 
-## Pipeline Mode (.pipeline/<ticket>/ exists)
-**Read:** 000-discuss/CONTEXT.md (if exists), 001-contracts/, 002-tests/ (domain tests), 004-code-review/round-N/ (if correction)
-**Write:** 003-domain/ + internal/domain/
-**Goal:** Make domain tests GREEN. Never modify tests.
-**On completion:** Update STATE.md `agent: domain-modeler, status: completed`.
+## Phased mode
 
-REPORT.md MUST include Public API section:
+When the work arrives already split into phases:
+**Read:** the type contracts and the failing domain tests (plus review feedback, if correcting)
+**Write:** `internal/domain/` only
+**Goal:** make the domain tests GREEN. Never modify tests.
+**On completion:** report the Public API in your final answer — downstream agents consume it.
+
+Your report MUST include a Public API section:
 ```markdown
 ## Public API
 ### Constructor Functions

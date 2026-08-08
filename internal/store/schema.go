@@ -236,5 +236,24 @@ GROUP BY d.icd_code, d.icd_label, p.year_month;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mv_epidemiological
 ON mv_epidemiological (icd_code, period);`,
 		},
+		{
+			Version: 6,
+			Name:    "add care-pathway lifecycle to patient snapshot",
+			SQL: `
+-- Coluna, não dimensão: o conjunto é pequeno, fechado e vem de evento de
+-- domínio (ADMITTED/DISCHARGED/READMITTED/WITHDRAWN). Segue o precedente de
+-- income_band, que também é valor direto.
+--
+-- lifecycle_reason guarda o motivo CATEGÓRICO da transição (motivo de alta,
+-- por exemplo). O campo 'notes' dos eventos de origem é texto livre escrito por
+-- técnico e pode nomear pessoas — não é lido nem armazenado.
+ALTER TABLE fact_patient_snapshot
+    ADD COLUMN IF NOT EXISTS lifecycle_status VARCHAR(20),
+    ADD COLUMN IF NOT EXISTS lifecycle_reason VARCHAR(80);
+
+CREATE INDEX IF NOT EXISTS idx_fps_lifecycle_status
+ON fact_patient_snapshot (lifecycle_status)
+WHERE lifecycle_status IS NOT NULL;`,
+		},
 	}
 }

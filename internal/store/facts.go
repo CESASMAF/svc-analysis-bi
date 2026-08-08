@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/acdgbrasil/svc-analysis-bi/internal/ingestion"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -357,6 +358,47 @@ func (s *PgFactStore) UpsertFamilyComposition(ctx context.Context, record ingest
 	`, periodID, geoID, float64(p.FamilySizeDelta), familyDelta, elderlyDelta, childrenDelta)
 	if err != nil {
 		return fmt.Errorf("%w: fact_family_composition: %v", ErrFactUpsertFailed, err)
+	}
+	return nil
+}
+
+// UpdatePatientLifecycle records a care-pathway transition on the patient's
+// snapshot for the event's period.
+//
+// It is an UPDATE, never an upsert, and that is the whole point. The snapshot
+// row carries the demographic dimensions (age band, sex, geography, all NOT
+// NULL) that arrive with PatientCreated. An upsert driven by a lifecycle event
+// would either fail those constraints or, worse, overwrite a populated snapshot
+// with empty dimensions — losing the demographics to record a status.
+//
+// If no row matches, the transition is skipped and reported. That is expected,
+// not exceptional: a patient admitted in March and discharged in July has no
+// July snapshot until the carry-forward job creates one. Failing here would
+// stall the whole ingestion pipeline over a row that will exist tomorrow.
+func (s *PgFactStore) UpdatePatientLifecycle(ctx context.Context, record ingestion.AnonymizedRecord) error {
+	p := record.Lifecycle
+	if p == nil {
+		return fmt.Errorf("%w: expected Lifecycle payload for kind %q", ErrNilPayload, record.Kind)
+	}
+
+	periodID, err := s.dims.GetOrCreatePeriod(ctx, record.Period)
+	if err != nil {
+		return fmt.Errorf("%w: period: %v", ErrMissingDimensions, err)
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE fact_patient_snapshot
+		   SET lifecycle_status = $1,
+		       lifecycle_reason = NULLIF($2, '')
+		 WHERE period_id = $3 AND patient_hash = $4
+	`, string(p.Status), p.Reason, periodID, string(record.PatientHash))
+	if err != nil {
+		return fmt.Errorf("update lifecycle: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		slog.Info("lifecycle transition has no snapshot in this period; skipped",
+			"status", p.Status, "period", record.Period, "eventId", record.EventID)
 	}
 	return nil
 }

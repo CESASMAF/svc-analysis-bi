@@ -47,5 +47,16 @@ func NewEventHandlerRegistry(geo domain.GeographyLookup, salt string) EventHandl
 	register(domain.EventRightsViolationReported)
 	register(domain.EventReferralCreated)
 
+	// Ciclo de vida do atendimento (ADR-002). Sem registro aqui o evento nem
+	// chega ao anonymizer: o pipeline consulta ESTE mapa e manda para a DLQ o
+	// que não encontra. Era por isto que os cinco caíam em silêncio.
+	register(domain.EventPatientAdmitted)
+	register(domain.EventPatientDischarged)
+	register(domain.EventPatientReadmitted)
+	register(domain.EventPatientWithdrawnFromWaitlist)
+
+	// Erasure na origem — reconhecido, sem efeito local (ADR-002 §4).
+	register(domain.EventPatientPIIAnonymized)
+
 	return registry
 }

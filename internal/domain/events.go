@@ -23,6 +23,17 @@ const (
 	EventPlacementHistoryUpdated    EventType = "social-care.events.PlacementHistoryUpdatedEvent"
 	EventRightsViolationReported    EventType = "social-care.events.RightsViolationReportedEvent"
 	EventReferralCreated            EventType = "social-care.events.ReferralCreatedEvent"
+
+	// Ciclo de vida do atendimento. Sem estes, o serviço não sabe responder
+	// quando alguém entrou ou saiu — a pergunta mais básica do domínio.
+	EventPatientAdmitted              EventType = "social-care.events.PatientAdmittedEvent"
+	EventPatientDischarged            EventType = "social-care.events.PatientDischargedEvent"
+	EventPatientReadmitted            EventType = "social-care.events.PatientReadmittedEvent"
+	EventPatientWithdrawnFromWaitlist EventType = "social-care.events.PatientWithdrawnFromWaitlistEvent"
+
+	// Erasure LGPD executada na origem (ADR-039 do social-care). Reconhecido de
+	// propósito e SEM efeito — ver docs/adr/ADR-002-pii-anonymized-noop.md.
+	EventPatientPIIAnonymized EventType = "social-care.events.PatientPIIAnonymizedEvent"
 )
 
 // EventMetadata contains traceability fields present in every event.

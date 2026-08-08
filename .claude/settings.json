@@ -14,7 +14,14 @@
   "permissions": {
     "allow": [
       "Read(../infra/reference/**)",
-      "Read(../web/handbook/reference/**)"
+      "Read(../app-conecta-web/handbook/**)"
+    ],
+    "deny": [
+      "Read(./bin/**)",
+      "Read(./**/testdata/**/*.golden)",
+      "Read(./**/*.generated.go)",
+      "Read(./go.sum)",
+      "Read(./**/*.pdf)"
     ]
   }
 }

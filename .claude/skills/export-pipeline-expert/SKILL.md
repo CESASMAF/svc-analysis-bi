@@ -13,6 +13,21 @@ user_invocable: true
 
 You are the export pipeline specialist. You design and implement encoders that transform analytical indicator data into 8 different output formats for diverse consumers.
 
+> ## Zero external dependencies — all 8 encoders are stdlib
+>
+> `go.mod` has exactly three direct requires: **chi, pgx, nats.go**. Not one of
+> them is an encoding library. All 8 formats — including Parquet, DBF, DBC and
+> ODS — are implemented by hand in `internal/export/`, already working, with
+> tests in `encoder_test.go`.
+>
+> **Never `go get` an encoding library for this pipeline.** If a task looks like
+> it needs `segmentio/parquet-go`, `go-dbf` or `excelize`, the answer is to
+> extend the existing encoder, not to add a dependency and rewrite it. Adding one
+> also breaks the build contract: `CGO_ENABLED=0` + `FROM scratch`.
+>
+> Read the target encoder in `internal/export/` before proposing any change —
+> the file is the source of truth, this skill is the map.
+
 ## Encoder Interface
 
 ```go
@@ -118,10 +133,13 @@ type ParquetEncoder struct{}
 func (e *ParquetEncoder) ContentType() string    { return "application/octet-stream" }
 func (e *ParquetEncoder) FileExtension() string  { return "parquet" }
 ```
-- Uses `segmentio/parquet-go`
+- **Hand-rolled with stdlib** (`bytes`, `encoding/binary`, `io`) — there is NO
+  Parquet dependency in `go.mod`. Do not `go get segmentio/parquet-go`.
+- Minimal writer: `PAR1` magic, single row group, plain encoding, no compression,
+  then file metadata + footer. See the `TODO` in `internal/export/parquet.go` for
+  the known Thrift compact-protocol limitations before extending it.
 - Columnar format optimized for analytics tools
 - **No PII in file metadata** (created_by, key-value metadata)
-- Row group size tuned for dataset size
 
 ### 5. DBF (DataSUS / TABWIN)
 ```go
@@ -130,9 +148,11 @@ type DBFEncoder struct{}
 func (e *DBFEncoder) ContentType() string    { return "application/octet-stream" }
 func (e *DBFEncoder) FileExtension() string  { return "dbf" }
 ```
-- Uses `go-dbf` library
+- **Hand-rolled with stdlib** (`bytes`, `encoding/binary`, `io`) — there is NO
+  `go-dbf` dependency in `go.mod`. The dBASE III header and field descriptors
+  are written byte by byte in `internal/export/dbf.go`.
 - dBASE III format (compatible with TABWIN)
-- Field names max 10 characters (DBF limitation)
+- Field names truncated to 10 characters (dBASE spec)
 - Character encoding: CP1252 for TABWIN compatibility
 
 ### 6. DBC (DataSUS compressed)
@@ -142,8 +162,12 @@ type DBCEncoder struct{}
 func (e *DBCEncoder) ContentType() string    { return "application/octet-stream" }
 func (e *DBCEncoder) FileExtension() string  { return "dbc" }
 ```
-- DBF compressed with LZ77 (DataSUS native format)
-- Either CGo with blast-dbf or pure Go LZ77 implementation
+- DBF compressed with PKZIP deflate, via stdlib `compress/flate` — compatible
+  with DataSUS tooling. Structure: 8-byte header (original size + compressed
+  size, little-endian) followed by the deflate stream.
+- **CGo is not an option in this service.** The build is `CGO_ENABLED=0` and the
+  runtime image is `FROM scratch`; a cgo-linked binary would not run. Do not
+  propose `blast-dbf` or any CGo wrapper — pure Go is the only path.
 - Same field structure as DBF encoder
 
 ### 7. ODS (Open Document Spreadsheet)
@@ -153,7 +177,9 @@ type ODSEncoder struct{}
 func (e *ODSEncoder) ContentType() string    { return "application/vnd.oasis.opendocument.spreadsheet" }
 func (e *ODSEncoder) FileExtension() string  { return "ods" }
 ```
-- Uses excelize or manual ODS XML construction
+- **Hand-rolled with stdlib** (`archive/zip`, `strings`, `bytes`, `io`) — there
+  is NO `excelize` dependency in `go.mod`. ODS is a ZIP archive; the encoder
+  writes the minimal set: `mimetype`, `META-INF/manifest.xml`, `content.xml`.
 - **No PII in document properties** (author, company, description)
 - Sheet name: dataset name
 - Header row with column labels

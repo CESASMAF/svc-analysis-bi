@@ -30,7 +30,7 @@ func TestAnonymize_PatientIDIsHashed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			evt := rawPatientEvent(tt.patientID, "1990-01-15", "MALE", "13083970")
+			evt := rawPatientEvent(tt.patientID, "30-34", "masculino", "3515")
 
 			rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientCreated, evt)
 			if err != nil {
@@ -62,7 +62,7 @@ func TestAnonymize_DifferentSaltsProduceDifferentHashes(t *testing.T) {
 	anonymizer1 := NewAnonymizer(geoLookup, "salt-one")
 	anonymizer2 := NewAnonymizer(geoLookup, "salt-two")
 
-	evt := rawPatientEvent("same-patient-id", "1990-01-15", "MALE", "13083970")
+	evt := rawPatientEvent("same-patient-id", "30-34", "masculino", "3515")
 
 	rec1, err := anonymizer1.Anonymize(context.Background(), domain.EventPatientCreated, evt)
 	if err != nil {
@@ -83,72 +83,85 @@ func TestAnonymize_DifferentSaltsProduceDifferentHashes(t *testing.T) {
 // Test: BirthDate is generalized to age band
 // ---------------------------------------------------------------------------
 
-func TestAnonymize_BirthDateGeneralizedToAgeBand(t *testing.T) {
-	geoLookup := newFakeGeographyLookup()
-	salt := "test-salt"
+func TestAnonymize_AgeBandComesFromProducerNotDerivedHere(t *testing.T) {
+	anonymizer := NewAnonymizer(newFakeGeographyLookup(), "test-salt")
 
-	anonymizer := NewAnonymizer(geoLookup, salt)
-
-	tests := []struct {
-		name          string
-		birthDate     string
-		wantBandLabel string
+	// social-care generalizes at the source. This service must accept the label
+	// as given — deriving it again would require birthDate, which is PII and no
+	// longer crosses the boundary.
+	for _, tt := range []struct {
+		name  string
+		label string
 	}{
-		{"infant born 2024", "2024-06-01", "0-4"},
-		{"child born 2018", "2018-03-15", "5-9"},
-		{"teenager born 2010", "2010-01-01", "15-19"}, // age at occurredAt (2025-06-15) = 15
-		{"adult born 1990", "1990-07-20", "30-34"},
-		{"elderly born 1940", "1940-12-25", "80+"},
-	}
-
-	for _, tt := range tests {
+		{"infant", "0-4"},
+		{"teenager", "15-19"},
+		{"adult", "30-34"},
+		{"open top band", "80+"},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
-			evt := rawPatientEvent("pat-age-test", tt.birthDate, "MALE", "13083970")
+			evt := rawPatientEvent("pat-age-test", tt.label, "masculino", "3515")
 
 			rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientCreated, evt)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-
-			if rec.Snapshot == nil {
-				t.Fatal("expected Snapshot payload to be non-nil")
-			}
-
-			if rec.Snapshot.AgeBand.Label != tt.wantBandLabel {
-				t.Errorf("AgeBand.Label = %q, want %q", rec.Snapshot.AgeBand.Label, tt.wantBandLabel)
-			}
-
-			// The exact birth date must NOT appear anywhere in the serialized record
-			recJSON, _ := json.Marshal(rec)
-			if strings.Contains(string(recJSON), tt.birthDate) {
-				t.Error("exact birth date must not appear in anonymized record")
+			if rec.Snapshot.AgeBand.Label != tt.label {
+				t.Errorf("AgeBand.Label = %q, want %q", rec.Snapshot.AgeBand.Label, tt.label)
 			}
 		})
 	}
 }
 
+func TestAnonymize_UnknownAgeBandLabelFails(t *testing.T) {
+	anonymizer := NewAnonymizer(newFakeGeographyLookup(), "test-salt")
+
+	// A label this service does not know is a contract break, not data to guess
+	// around. Reconstructing "31-33" into something plausible would put a made-up
+	// category into the cube.
+	evt := rawPatientEvent("pat-bad-band", "31-33", "masculino", "3515")
+
+	if _, err := anonymizer.Anonymize(context.Background(), domain.EventPatientCreated, evt); err == nil {
+		t.Fatal("expected an error for an unknown age band label")
+	}
+}
+
+func TestAnonymize_MissingAgeBandStaysEmpty(t *testing.T) {
+	anonymizer := NewAnonymizer(newFakeGeographyLookup(), "test-salt")
+
+	// A patient registered without personal data has no age band. Empty must
+	// stay empty: turning "unknown" into a band would bias every demographic
+	// indicator, and k-anonymity would be computed over a category that does
+	// not exist.
+	evt := rawPatientEvent("pat-no-band", "", "", "")
+
+	rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientCreated, evt)
+	if err != nil {
+		t.Fatalf("missing quasi-identifiers must be tolerated, got: %v", err)
+	}
+	if rec.Snapshot.AgeBand.Label != "" {
+		t.Errorf("AgeBand.Label = %q, want empty", rec.Snapshot.AgeBand.Label)
+	}
+	if rec.Snapshot.Sex != domain.SexUnknown {
+		t.Errorf("Sex = %q, want %q", rec.Snapshot.Sex, domain.SexUnknown)
+	}
+}
+
 // ---------------------------------------------------------------------------
-// Test: CEP is generalized to mesoregion
+// Test: mesoregion arrives already resolved; no CEP ever reaches this service
 // ---------------------------------------------------------------------------
 
-func TestAnonymize_CEPGeneralizedToMesoregion(t *testing.T) {
-	geoLookup := newFakeGeographyLookup()
-	salt := "test-salt"
+func TestAnonymize_MesoregionComesFromProducer(t *testing.T) {
+	anonymizer := NewAnonymizer(newFakeGeographyLookup(), "test-salt")
 
-	anonymizer := NewAnonymizer(geoLookup, salt)
-
-	evt := rawPatientEvent("pat-cep-test", "1990-01-01", "FEMALE", "13083970")
+	evt := rawPatientEvent("pat-geo-test", "30-34", "feminino", "3515")
 
 	rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientCreated, evt)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
 	if rec.Snapshot == nil {
 		t.Fatal("expected Snapshot payload to be non-nil")
 	}
-
-	// Geography should match the fake lookup's return value
 	if rec.Snapshot.Geography.MesoregionCode != "3515" {
 		t.Errorf("MesoregionCode = %q, want %q", rec.Snapshot.Geography.MesoregionCode, "3515")
 	}
@@ -156,22 +169,23 @@ func TestAnonymize_CEPGeneralizedToMesoregion(t *testing.T) {
 		t.Errorf("MesoregionName = %q, want %q", rec.Snapshot.Geography.MesoregionName, "Campinas")
 	}
 
-	// The exact CEP must NOT appear in the serialized record
+	// Regression guard for the whole point of generalizing at the source: no
+	// CEP-shaped value may exist anywhere in the record.
 	recJSON, _ := json.Marshal(rec)
 	if strings.Contains(string(recJSON), "13083970") {
-		t.Error("exact CEP must not appear in anonymized record")
+		t.Error("no exact CEP may appear in an anonymized record")
 	}
 }
 
-func TestAnonymize_CEPLookupFailure_GracefulDegradation(t *testing.T) {
-	geoLookup := newFakeGeographyLookupWithError(domain.ErrCEPNotFound)
-	salt := "test-salt"
+func TestAnonymize_MissingMesoregion_GracefulDegradation(t *testing.T) {
+	// The lookup is irrelevant now — this service no longer resolves CEP. What
+	// matters is that a patient without an address (or with an unmapped CEP,
+	// resolved to nothing upstream) still produces a valid record.
+	anonymizer := NewAnonymizer(newFakeGeographyLookupWithError(domain.ErrCEPNotFound), "test-salt")
 
-	anonymizer := NewAnonymizer(geoLookup, salt)
+	evt := rawPatientEvent("pat-cep-fail", "30-34", "masculino", "")
 
-	evt := rawPatientEvent("pat-cep-fail", "1990-01-01", "MALE", "99999999")
-
-	// CEP is optional — lookup failure is gracefully skipped
+	// mesoregion is optional — absence is gracefully skipped
 	rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientCreated, evt)
 	if err != nil {
 		t.Fatalf("CEP failure should be graceful, got: %v", err)
@@ -185,47 +199,16 @@ func TestAnonymize_CEPLookupFailure_GracefulDegradation(t *testing.T) {
 // Test: Income is generalized to income band
 // ---------------------------------------------------------------------------
 
-func TestAnonymize_IncomeGeneralizedToIncomeBand(t *testing.T) {
-	geoLookup := newFakeGeographyLookup()
-	salt := "test-salt"
-
-	anonymizer := NewAnonymizer(geoLookup, salt)
-
-	tests := []struct {
-		name       string
-		incomeCents int64
-		wantBand   domain.IncomeBand
-	}{
-		{"zero income", 0, domain.IncomeBand0to05SM},
-		{"half minimum wage", 70600, domain.IncomeBand0to05SM},
-		{"one minimum wage", 141200, domain.IncomeBand1to2SM},
-		{"three minimum wages", 423600, domain.IncomeBand3to5SM},
-		{"high income", 1000000, domain.IncomeBand5PlusSM},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			evt := rawPatientEventWithIncome("pat-income-test", "1990-01-01", "MALE", "13083970", tt.incomeCents)
-
-			rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientCreated, evt)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-
-			if rec.Snapshot == nil {
-				t.Fatal("expected Snapshot payload to be non-nil")
-			}
-
-			if rec.Snapshot.IncomeBand != tt.wantBand {
-				t.Errorf("IncomeBand = %q, want %q", rec.Snapshot.IncomeBand, tt.wantBand)
-			}
-
-			// Exact income value must not appear in serialized record
-			// The IncomeBand is a coarse bracket, not the exact amount
-			_, _ = json.Marshal(rec) // ensure record is serializable
-		})
-	}
-}
+// TestAnonymize_IncomeGeneralizedToIncomeBand foi REMOVIDO (auditoria 2026-08-06).
+//
+// Ele exercitava `totalIncomeCents` no PatientCreated — um campo que
+// social-care nunca enviou nesse evento. O teste passava porque a fixture o
+// fabricava; nenhum evento real jamais teve renda ali. Testar contra uma
+// fixture que o produtor não produz é como não testar.
+//
+// Renda muda por avaliação social (SocioEconomicSituationUpdatedEvent). Quando
+// `anonymizeGenericAssessment` passar a extrair renda do `after`, o teste
+// correto nasce lá — contra o payload que existe de verdade.
 
 // ---------------------------------------------------------------------------
 // Test: PII fields are completely absent from AnonymizedRecord
@@ -238,10 +221,10 @@ func TestAnonymize_PIIFieldsAbsent(t *testing.T) {
 	anonymizer := NewAnonymizer(geoLookup, salt)
 
 	piiFields := []struct {
-		name       string
-		eventType  domain.EventType
-		rawEvent   []byte
-		piiValues  []string
+		name      string
+		eventType domain.EventType
+		rawEvent  []byte
+		piiValues []string
 	}{
 		{
 			name:      "actorId absent from appointment",
@@ -274,13 +257,13 @@ func TestAnonymize_PIIFieldsAbsent(t *testing.T) {
 			name:      "victimId absent from violation",
 			eventType: domain.EventRightsViolationReported,
 			rawEvent: mustJSON(map[string]any{
-				"id":             "evt-pii-victim",
-				"occurredAt":     "2025-06-15T10:00:00Z",
-				"actorId":        "actor-001",
-				"patientId":      "pat-pii-victim",
-				"reportId":       "report-uuid-must-vanish",
-				"victimId":       "victim-uuid-must-vanish",
-				"violationType":  "neglect",
+				"id":            "evt-pii-victim",
+				"occurredAt":    "2025-06-15T10:00:00Z",
+				"actorId":       "actor-001",
+				"patientId":     "pat-pii-victim",
+				"reportId":      "report-uuid-must-vanish",
+				"victimId":      "victim-uuid-must-vanish",
+				"violationType": "neglect",
 			}),
 			piiValues: []string{"victim-uuid-must-vanish", "report-uuid-must-vanish"},
 		},
@@ -288,11 +271,11 @@ func TestAnonymize_PIIFieldsAbsent(t *testing.T) {
 			name:      "caregiverId absent from caregiver assigned",
 			eventType: domain.EventPrimaryCaregiverAssigned,
 			rawEvent: mustJSON(map[string]any{
-				"id":           "evt-pii-caregiver",
-				"occurredAt":   "2025-06-15T10:00:00Z",
-				"actorId":      "actor-001",
-				"patientId":    "pat-pii-caregiver",
-				"caregiverId":  "caregiver-uuid-must-vanish",
+				"id":          "evt-pii-caregiver",
+				"occurredAt":  "2025-06-15T10:00:00Z",
+				"actorId":     "actor-001",
+				"patientId":   "pat-pii-caregiver",
+				"caregiverId": "caregiver-uuid-must-vanish",
 			}),
 			piiValues: []string{"caregiver-uuid-must-vanish"},
 		},
@@ -341,7 +324,7 @@ func TestAnonymize_EmptySaltError(t *testing.T) {
 
 	anonymizer := NewAnonymizer(geoLookup, "")
 
-	evt := rawPatientEvent("pat-empty-salt", "1990-01-01", "MALE", "13083970")
+	evt := rawPatientEvent("pat-empty-salt", "30-34", "masculino", "3515")
 
 	_, err := anonymizer.Anonymize(context.Background(), domain.EventPatientCreated, evt)
 	if err == nil {
@@ -372,7 +355,7 @@ func TestAnonymize_PeriodDerivedFromOccurredAt(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			evt := rawPatientEventWithOccurredAt("pat-period-test", "1990-01-01", "MALE", "13083970", tt.occurredAt)
+			evt := rawPatientEventWithOccurredAt("pat-period-test", "30-34", "masculino", "3515", tt.occurredAt)
 
 			rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientCreated, evt)
 			if err != nil {
@@ -412,7 +395,7 @@ func TestAnonymize_SexMapping(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			evt := rawPatientEvent("pat-sex-test", "1990-01-01", tt.sex, "13083970")
+			evt := rawPatientEvent("pat-sex-test", "30-34", tt.sex, "3515")
 
 			rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientCreated, evt)
 			if err != nil {
@@ -433,35 +416,26 @@ func TestAnonymize_SexMapping(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func rawPatientEvent(patientID, birthDate, sex, cep string) []byte {
-	return rawPatientEventWithOccurredAt(patientID, birthDate, sex, cep, "2025-06-15T10:00:00Z")
+// rawPatientEvent builds a PatientCreated payload in the CURRENT contract:
+// social-care sends quasi-identifiers already generalized. The parameters are
+// named ageBand/mesoregion (not birthDate/cep) because neither PII field
+// crosses the boundary any more.
+func rawPatientEvent(patientID, ageBand, sex, mesoregion string) []byte {
+	return rawPatientEventWithOccurredAt(patientID, ageBand, sex, mesoregion, "2025-06-15T10:00:00Z")
 }
 
-func rawPatientEventWithOccurredAt(patientID, birthDate, sex, cep, occurredAt string) []byte {
+func rawPatientEventWithOccurredAt(patientID, ageBand, sex, mesoregion, occurredAt string) []byte {
 	data, _ := json.Marshal(map[string]any{
-		"id":         "evt-anon-" + patientID,
-		"occurredAt": occurredAt,
-		"actorId":    "actor-001",
-		"patientId":  patientID,
-		"personId":   "person-" + patientID,
-		"birthDate":  birthDate,
-		"sex":        sex,
-		"cep":        cep,
-	})
-	return data
-}
-
-func rawPatientEventWithIncome(patientID, birthDate, sex, cep string, incomeCents int64) []byte {
-	data, _ := json.Marshal(map[string]any{
-		"id":               "evt-income-" + patientID,
-		"occurredAt":       "2025-06-15T10:00:00Z",
-		"actorId":          "actor-001",
-		"patientId":        patientID,
-		"personId":         "person-" + patientID,
-		"birthDate":        birthDate,
-		"sex":              sex,
-		"cep":              cep,
-		"totalIncomeCents": incomeCents,
+		"id":             "evt-anon-" + patientID,
+		"occurredAt":     occurredAt,
+		"actorId":        "actor-001",
+		"patientId":      patientID,
+		"personId":       "person-" + patientID,
+		"ageBand":        ageBand,
+		"sex":            sex,
+		"mesoregionCode": mesoregion,
+		"mesoregionName": "Campinas",
+		"stateCode":      "35",
 	})
 	return data
 }
@@ -472,4 +446,106 @@ func mustJSON(v any) []byte {
 		panic("mustJSON: " + err.Error())
 	}
 	return data
+}
+
+// ---------------------------------------------------------------------------
+// Test: care-pathway lifecycle (ADR-002)
+// ---------------------------------------------------------------------------
+
+func TestAnonymize_LifecycleTransitions(t *testing.T) {
+	anonymizer := NewAnonymizer(newFakeGeographyLookup(), "test-salt")
+
+	for _, tt := range []struct {
+		name       string
+		eventType  domain.EventType
+		reason     string
+		wantStatus domain.LifecycleStatus
+		wantReason string
+	}{
+		{"admitted", domain.EventPatientAdmitted, "", domain.LifecycleAdmitted, ""},
+		{"discharged", domain.EventPatientDischarged, "objetivos alcancados", domain.LifecycleDischarged, "objetivos alcancados"},
+		{"readmitted", domain.EventPatientReadmitted, "", domain.LifecycleReadmitted, ""},
+		{"withdrawn", domain.EventPatientWithdrawnFromWaitlist, "mudanca de municipio", domain.LifecycleWithdrawn, "mudanca de municipio"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			evt := mustJSON(map[string]any{
+				"id":         "evt-lc-" + tt.name,
+				"occurredAt": "2025-06-15T10:00:00Z",
+				"actorId":    "actor-001",
+				"patientId":  "pat-lc",
+				"personId":   "person-lc",
+				"reason":     tt.reason,
+			})
+
+			rec, err := anonymizer.Anonymize(context.Background(), tt.eventType, evt)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if rec.Kind != FactKindLifecycle {
+				t.Errorf("Kind = %q, want %q", rec.Kind, FactKindLifecycle)
+			}
+			if rec.Lifecycle == nil {
+				t.Fatal("expected Lifecycle payload")
+			}
+			if rec.Lifecycle.Status != tt.wantStatus {
+				t.Errorf("Status = %q, want %q", rec.Lifecycle.Status, tt.wantStatus)
+			}
+			if rec.Lifecycle.Reason != tt.wantReason {
+				t.Errorf("Reason = %q, want %q", rec.Lifecycle.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+func TestAnonymize_LifecycleNeverCarriesNotes(t *testing.T) {
+	anonymizer := NewAnonymizer(newFakeGeographyLookup(), "test-salt")
+
+	// `notes` is free text written by a caseworker and may name people. The
+	// event carries it; this service must not surface it anywhere in the record.
+	secret := "mae relatou violencia domestica na rua das Flores 123"
+	evt := mustJSON(map[string]any{
+		"id":         "evt-lc-notes",
+		"occurredAt": "2025-06-15T10:00:00Z",
+		"actorId":    "actor-001",
+		"patientId":  "pat-lc",
+		"personId":   "person-lc",
+		"reason":     "encaminhado",
+		"notes":      secret,
+	})
+
+	rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientDischarged, evt)
+	if err != nil {
+		t.Fatalf("an unknown field must not break ingestion: %v", err)
+	}
+
+	recJSON, _ := json.Marshal(rec)
+	if strings.Contains(string(recJSON), "violencia") || strings.Contains(string(recJSON), "Flores") {
+		t.Error("free-text notes leaked into the anonymized record")
+	}
+}
+
+func TestAnonymize_PIIAnonymizedIsAcknowledgedNotDropped(t *testing.T) {
+	anonymizer := NewAnonymizer(newFakeGeographyLookup(), "test-salt")
+
+	// ADR-002: this service holds nothing to erase, so the event has no effect.
+	// But it must be RECOGNIZED — falling through to the default branch would
+	// report "unknown event type", which is indistinguishable from a bug.
+	evt := mustJSON(map[string]any{
+		"id":         "evt-erasure",
+		"occurredAt": "2025-06-15T10:00:00Z",
+		"actorId":    "actor-001",
+		"patientId":  "pat-erased",
+		"personId":   "person-erased",
+	})
+
+	rec, err := anonymizer.Anonymize(context.Background(), domain.EventPatientPIIAnonymized, evt)
+	if err != nil {
+		t.Fatalf("erasure event must be recognized, got: %v", err)
+	}
+	if rec.Kind != FactKindNone {
+		t.Errorf("Kind = %q, want %q", rec.Kind, FactKindNone)
+	}
+	if rec.Snapshot != nil || rec.Lifecycle != nil {
+		t.Error("erasure event must not materialize any payload")
+	}
 }

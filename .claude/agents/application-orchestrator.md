@@ -14,15 +14,17 @@ You are spawned with ONLY the context you need. Do NOT explore unrelated pipelin
 Your context boundary: 001-contracts/, 002-tests/ (ingestion tests only), 003-domain/REPORT.md, 000-discuss/CONTEXT.md.
 You MUST NOT read: 003-infra/.
 
-## Pipeline Mode (.pipeline/<ticket>/ exists)
-**Read:** 000-discuss/CONTEXT.md (if exists), 001-contracts/, 002-tests/ (ingestion tests), 003-domain/REPORT.md (Public API), 004-code-review/round-N/
-**Write:** 003-application/ + internal/ingestion/
-**Goal:** Make ingestion tests GREEN. Never modify tests.
-**On completion:** Update STATE.md `agent: application-orchestrator, status: completed`.
+## Phased mode
+
+When the work arrives already split into phases:
+**Read:** the type contracts, the failing ingestion tests, and domain-modeler's reported Public API
+**Write:** `internal/ingestion/` only
+**Goal:** make the ingestion tests GREEN. Never modify tests.
+**On completion:** report the Public API in your final answer.
 
 Read domain-modeler's Public API to know which domain functions to call.
 
-REPORT.md MUST include Public API section:
+Your report MUST include a Public API section:
 ```markdown
 ## Public API
 ### Event Consumer

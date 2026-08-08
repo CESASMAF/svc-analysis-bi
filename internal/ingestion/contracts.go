@@ -90,13 +90,23 @@ type RawMessage struct {
 type FactKind string
 
 const (
-	FactKindPatientSnapshot    FactKind = "patient_snapshot"
-	FactKindDiagnosis          FactKind = "diagnosis"
-	FactKindAppointment        FactKind = "appointment"
-	FactKindReferral           FactKind = "referral"
-	FactKindViolation          FactKind = "violation"
-	FactKindBenefit            FactKind = "benefit"
-	FactKindFamilyComposition  FactKind = "family_composition"
+	FactKindPatientSnapshot   FactKind = "patient_snapshot"
+	FactKindDiagnosis         FactKind = "diagnosis"
+	FactKindAppointment       FactKind = "appointment"
+	FactKindReferral          FactKind = "referral"
+	FactKindViolation         FactKind = "violation"
+	FactKindBenefit           FactKind = "benefit"
+	FactKindFamilyComposition FactKind = "family_composition"
+
+	// FactKindLifecycle updates the care-pathway status on an existing snapshot.
+	FactKindLifecycle FactKind = "lifecycle"
+
+	// FactKindNone is a recognized event that materializes nothing.
+	//
+	// It exists so that "we decided this event has no effect here" is
+	// distinguishable from "we forgot to handle it". Without it, both look the
+	// same at runtime: a trip to the DLQ.
+	FactKindNone FactKind = "none"
 )
 
 // AnonymizedRecord is the output of the anonymization stage and the input
@@ -124,7 +134,8 @@ type AnonymizedRecord struct {
 	// PatientHash is the irreversible SHA-256 digest of the patient ID.
 	PatientHash domain.PatientHash
 
-	// Payload -- exactly one is non-nil based on Kind.
+	// Payload -- exactly one is non-nil based on Kind (none for FactKindNone).
+	Lifecycle         *LifecyclePayload
 	Snapshot          *SnapshotPayload
 	Diagnosis         *DiagnosisPayload
 	Appointment       *AppointmentPayload
@@ -148,6 +159,18 @@ type SnapshotPayload struct {
 	IsOvercrowded          bool
 	FamilySize             int
 	AssessmentCompleteness float64
+}
+
+// LifecyclePayload carries a care-pathway transition.
+//
+// `Reason` is a categorical value from the source domain (e.g. the discharge
+// reason). The `notes` field that travels alongside it in the source events is
+// deliberately NOT read: it is free text filled in by a caseworker and can name
+// people, addresses or conditions. A single unfiltered note would put PII into
+// a service that promises to hold none.
+type LifecyclePayload struct {
+	Status domain.LifecycleStatus
+	Reason string
 }
 
 // DiagnosisPayload carries the anonymized data for fact_diagnosis.
@@ -182,8 +205,8 @@ type ViolationPayload struct {
 
 // BenefitPayload carries the anonymized data for fact_benefit.
 type BenefitPayload struct {
-	Geography       domain.Geography
-	BenefitType     string
+	Geography        domain.Geography
+	BenefitType      string
 	BeneficiaryDelta int
 	Amount           int64
 }
@@ -253,6 +276,11 @@ type FactStore interface {
 	// given period. The UNIQUE(period_id, patient_hash) constraint ensures
 	// that only one snapshot per patient per period exists.
 	UpsertPatientSnapshot(ctx context.Context, record AnonymizedRecord) error
+
+	// UpdatePatientLifecycle records a care-pathway transition on an existing
+	// snapshot. Never creates one: the demographic dimensions come from
+	// PatientCreated, and inventing them to record a status would lose them.
+	UpdatePatientLifecycle(ctx context.Context, record AnonymizedRecord) error
 
 	// IncrementDiagnosis increments (or inserts) a diagnosis fact row
 	// for the given period, geography, diagnosis, age band, and sex.

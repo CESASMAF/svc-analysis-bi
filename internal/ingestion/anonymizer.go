@@ -1,10 +1,12 @@
 package ingestion
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/acdgbrasil/svc-analysis-bi/internal/domain"
@@ -45,6 +47,16 @@ func (a *Anonymizer) Anonymize(ctx context.Context, eventType domain.EventType, 
 		return a.anonymizeFamilyMemberRemoved(data)
 	case domain.EventPrimaryCaregiverAssigned:
 		return a.anonymizeCaregiverAssigned(data)
+	case domain.EventPatientAdmitted:
+		return a.anonymizeLifecycle(data, domain.EventPatientAdmitted, domain.LifecycleAdmitted)
+	case domain.EventPatientDischarged:
+		return a.anonymizeLifecycle(data, domain.EventPatientDischarged, domain.LifecycleDischarged)
+	case domain.EventPatientReadmitted:
+		return a.anonymizeLifecycle(data, domain.EventPatientReadmitted, domain.LifecycleReadmitted)
+	case domain.EventPatientWithdrawnFromWaitlist:
+		return a.anonymizeLifecycle(data, domain.EventPatientWithdrawnFromWaitlist, domain.LifecycleWithdrawn)
+	case domain.EventPatientPIIAnonymized:
+		return a.acknowledgePIIAnonymized(data)
 	case domain.EventSocialIdentityUpdated,
 		domain.EventHousingConditionUpdated,
 		domain.EventSocioEconomicUpdated,
@@ -66,7 +78,7 @@ func (a *Anonymizer) Anonymize(ctx context.Context, eventType domain.EventType, 
 
 func (a *Anonymizer) anonymizePatientCreated(data []byte) (AnonymizedRecord, error) {
 	var evt jsonPatientCreated
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -85,39 +97,32 @@ func (a *Anonymizer) anonymizePatientCreated(data []byte) (AnonymizedRecord, err
 	}
 
 	period := domain.PeriodFromTime(occurredAt)
-	snapshot := &SnapshotPayload{
-		HousingType: evt.HousingType,
-	}
+	snapshot := &SnapshotPayload{}
 
-	// BirthDate, Sex, CEP are optional in PatientCreatedEvent — they may
-	// arrive in separate assessment update events (SocialIdentityUpdated, etc.)
-	if evt.BirthDate != "" {
-		birthDate, parseErr := time.Parse("2006-01-02", evt.BirthDate)
-		if parseErr == nil {
-			// Use occurredAt as age reference (not year-1) so that newborns
-			// registered in their birth year get a valid age band (0-4).
-			if ageBand, ageErr := domain.GeneralizeAge(birthDate, occurredAt); ageErr == nil {
-				snapshot.AgeBand = ageBand
-			}
+	// The quasi-identifiers arrive ALREADY generalized from social-care: an age
+	// band label, a sex, and an IBGE mesoregion. This service no longer derives
+	// them, because deriving them would require receiving birthDate and CEP —
+	// both PII, and both things this service promises never to hold.
+	//
+	// Empty stays empty on purpose. An absent age band must not become a
+	// category: "unknown" and "0-4" are different facts, and collapsing them
+	// would quietly bias every demographic indicator.
+	if evt.AgeBand != "" {
+		if band, ok := domain.AgeBandFromLabel(evt.AgeBand); ok {
+			snapshot.AgeBand = band
+		} else {
+			return AnonymizedRecord{}, fmt.Errorf("%w: unknown age band %q", ErrAnonymizationFailed, evt.AgeBand)
 		}
 	}
 
-	snapshot.Sex = mapSex(evt.Sex) // defaults to SexUnknown for empty string
+	snapshot.Sex = mapSex(evt.Sex) // empty -> SexUnknown
 
-	if evt.CEP != "" {
-		geo, geoErr := a.geo.FindByCEP(evt.CEP)
-		if geoErr == nil {
-			snapshot.Geography = geo
-		} else if !errors.Is(geoErr, domain.ErrCEPNotFound) {
-			// CEP format errors (wrong length, non-digit) are real data issues —
-			// not found is graceful (unmapped CEP), but format errors should not
-			// silently produce empty geography.
-			return AnonymizedRecord{}, fmt.Errorf("%w: CEP validation: %v", ErrAnonymizationFailed, geoErr)
+	if evt.MesoregionCode != "" {
+		snapshot.Geography = domain.Geography{
+			MesoregionCode: domain.MesoregionCode(evt.MesoregionCode),
+			MesoregionName: evt.MesoregionName,
+			StateCode:      evt.StateCode,
 		}
-	}
-
-	if evt.TotalIncomeCents != nil {
-		snapshot.IncomeBand = domain.GeneralizeIncome(*evt.TotalIncomeCents)
 	}
 
 	return AnonymizedRecord{
@@ -137,7 +142,7 @@ func (a *Anonymizer) anonymizePatientCreated(data []byte) (AnonymizedRecord, err
 
 func (a *Anonymizer) anonymizeHealthStatus(data []byte) (AnonymizedRecord, error) {
 	var evt jsonAssessmentUpdated
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -187,7 +192,7 @@ func (a *Anonymizer) anonymizeHealthStatus(data []byte) (AnonymizedRecord, error
 
 func (a *Anonymizer) anonymizeAppointment(data []byte) (AnonymizedRecord, error) {
 	var evt jsonAppointmentRegistered
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -226,7 +231,7 @@ func (a *Anonymizer) anonymizeAppointment(data []byte) (AnonymizedRecord, error)
 
 func (a *Anonymizer) anonymizeReferral(data []byte) (AnonymizedRecord, error) {
 	var evt jsonReferralCreated
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -265,7 +270,7 @@ func (a *Anonymizer) anonymizeReferral(data []byte) (AnonymizedRecord, error) {
 
 func (a *Anonymizer) anonymizeViolation(data []byte) (AnonymizedRecord, error) {
 	var evt jsonRightsViolationReported
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -304,7 +309,7 @@ func (a *Anonymizer) anonymizeViolation(data []byte) (AnonymizedRecord, error) {
 
 func (a *Anonymizer) anonymizeFamilyMemberAdded(data []byte) (AnonymizedRecord, error) {
 	var evt jsonFamilyMemberAdded
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -345,7 +350,7 @@ func (a *Anonymizer) anonymizeFamilyMemberAdded(data []byte) (AnonymizedRecord, 
 
 func (a *Anonymizer) anonymizeFamilyMemberRemoved(data []byte) (AnonymizedRecord, error) {
 	var evt jsonFamilyMemberRemoved
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -385,7 +390,7 @@ func (a *Anonymizer) anonymizeFamilyMemberRemoved(data []byte) (AnonymizedRecord
 
 func (a *Anonymizer) anonymizeCaregiverAssigned(data []byte) (AnonymizedRecord, error) {
 	var evt jsonPrimaryCaregiverAssigned
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -423,7 +428,7 @@ func (a *Anonymizer) anonymizeCaregiverAssigned(data []byte) (AnonymizedRecord, 
 
 func (a *Anonymizer) anonymizeGenericAssessment(eventType domain.EventType, data []byte) (AnonymizedRecord, error) {
 	var evt jsonGenericAssessment
-	if err := unmarshalStrict(data, &evt); err != nil {
+	if err := unmarshalEvent(data, &evt); err != nil {
 		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
 	}
 
@@ -459,25 +464,149 @@ func (a *Anonymizer) anonymizeGenericAssessment(eventType domain.EventType, data
 // ---------------------------------------------------------------------------
 
 // mapSex converts a raw sex string to domain.Sex.
+// mapSex maps the producer's vocabulary onto this service's.
+//
+// social-care emits the rawValue of its Swift `PersonalData.Sex` enum, which is
+// Portuguese and lowercase. The previous version matched only "MALE"/"FEMALE",
+// so every event would have collapsed to SexUnknown even once sex started being
+// sent — a silent bias that no field-level contract check would have caught,
+// because the field name matched and only the VALUES disagreed.
+//
+// The English forms are kept for tolerance; anything unrecognized is Unknown,
+// never a guess.
 func mapSex(raw string) domain.Sex {
 	switch raw {
-	case "MALE":
+	case "masculino", "MALE":
 		return domain.SexMale
-	case "FEMALE":
+	case "feminino", "FEMALE":
 		return domain.SexFemale
 	default:
+		// "outro" included: a third category would need its own dimension value
+		// and a decision about k-anonymity, which does not exist yet.
 		return domain.SexUnknown
 	}
 }
 
-// unmarshalStrict performs JSON unmarshalling and returns an error if the
+// unmarshalEvent performs JSON unmarshalling and returns an error if the
 // input is empty, null, or malformed.
-func unmarshalStrict(data []byte, v any) error {
+// unmarshalEvent decodes an inbound event payload.
+//
+// It is deliberately TOLERANT of unknown fields and only WARNS about them.
+// Rejecting would be wrong here: this is the consumer end of an event stream,
+// and the producer must be able to add a field without taking the consumer
+// down. Fail-closed on unknown fields would turn "social-care shipped a new
+// attribute" into "analysis-bi stopped ingesting everything".
+//
+// The warning is the point. An unknown field is the earliest signal that the
+// contract moved, and it is the only one visible at runtime.
+//
+// What this canNOT catch is a MISSING field — JSON omission is indistinguishable
+// from a zero value, so it stays silent no matter how strict the decoder is.
+// That asymmetry is exactly how `birthDate`, `sex` and `cep` were absent from
+// PatientCreatedEvent for months while every test stayed green (audit
+// 2026-08-06). Omission is caught by `scripts/check-event-contract.py`, which
+// compares the Swift structs the producer emits against the Go structs read
+// here. Runtime is tolerant; CI is strict.
+//
+// Renamed from `unmarshalEvent`: the old name promised rigor and delivered a
+// plain json.Unmarshal, which is worse than no check — it bought confidence
+// that was not earned.
+func unmarshalEvent(data []byte, v any) error {
 	if len(data) == 0 {
 		return fmt.Errorf("empty input")
 	}
 	if string(data) == "null" {
 		return fmt.Errorf("null input")
 	}
-	return json.Unmarshal(data, v)
+
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	err := dec.Decode(v)
+	if err == nil {
+		return nil
+	}
+
+	// Unknown field: warn and retry tolerantly. Any other error (type mismatch,
+	// malformed JSON) is a real failure and propagates.
+	if strings.Contains(err.Error(), "unknown field") {
+		slog.Warn("inbound event carries a field this service does not declare — the contract may have moved",
+			"detail", err.Error(),
+			"hint", "run scripts/check-event-contract.py")
+		return json.Unmarshal(data, v)
+	}
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle (admitted / discharged / readmitted / withdrawn)
+// ---------------------------------------------------------------------------
+
+func (a *Anonymizer) anonymizeLifecycle(
+	data []byte, eventType domain.EventType, status domain.LifecycleStatus,
+) (AnonymizedRecord, error) {
+	var evt jsonLifecycle
+	if err := unmarshalEvent(data, &evt); err != nil {
+		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
+	}
+
+	if evt.PatientID == "" || evt.ID == "" {
+		return AnonymizedRecord{}, fmt.Errorf("%w: missing required fields", ErrAnonymizationFailed)
+	}
+
+	hash, err := domain.HashPatientID(evt.PatientID, a.salt)
+	if err != nil {
+		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrAnonymizationFailed, err)
+	}
+
+	occurredAt, err := time.Parse(time.RFC3339, evt.OccurredAt)
+	if err != nil {
+		return AnonymizedRecord{}, fmt.Errorf("%w: invalid occurredAt: %v", ErrDeserializationFailed, err)
+	}
+
+	return AnonymizedRecord{
+		Kind:        FactKindLifecycle,
+		EventID:     evt.ID,
+		EventType:   eventType,
+		OccurredAt:  occurredAt,
+		Period:      domain.PeriodFromTime(occurredAt),
+		PatientHash: hash,
+		Lifecycle:   &LifecyclePayload{Status: status, Reason: evt.Reason},
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// PII anonymized on the source side — acknowledged, no effect
+// ---------------------------------------------------------------------------
+
+// acknowledgePIIAnonymized recognizes the erasure event and materializes nothing.
+//
+// See docs/adr/ADR-002-pii-anonymized-noop.md for the reasoning. In short: this
+// service never held the erased data — patient identity is a salted one-way
+// hash and everything else is generalized — so there is nothing here to erase.
+//
+// It is handled explicitly rather than left to the default branch because those
+// are not the same thing. Falling through to the DLQ would record "unknown
+// event type", which is what an unhandled bug looks like. A decision to do
+// nothing should be visible as a decision.
+func (a *Anonymizer) acknowledgePIIAnonymized(data []byte) (AnonymizedRecord, error) {
+	var evt jsonEventBase
+	if err := unmarshalEvent(data, &evt); err != nil {
+		return AnonymizedRecord{}, fmt.Errorf("%w: %v", ErrDeserializationFailed, err)
+	}
+
+	occurredAt, err := time.Parse(time.RFC3339, evt.OccurredAt)
+	if err != nil {
+		return AnonymizedRecord{}, fmt.Errorf("%w: invalid occurredAt: %v", ErrDeserializationFailed, err)
+	}
+
+	slog.Info("erasure acknowledged upstream; no local data to erase",
+		"eventId", evt.ID, "eventType", domain.EventPatientPIIAnonymized)
+
+	return AnonymizedRecord{
+		Kind:       FactKindNone,
+		EventID:    evt.ID,
+		EventType:  domain.EventPatientPIIAnonymized,
+		OccurredAt: occurredAt,
+		Period:     domain.PeriodFromTime(occurredAt),
+	}, nil
 }

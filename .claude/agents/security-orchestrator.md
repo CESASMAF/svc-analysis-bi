@@ -3,7 +3,7 @@ name: security-orchestrator
 description: >
   Agente orquestrador que coordena todos os agentes de seguranca em um assessment
   completo. Executa o pipeline: threat-analyst -> pentest-scanner -> auth-auditor ->
-  api-hardener -> pipeline-security-auditor -> secure-code-reviewer.
+  pipeline-security-auditor -> secure-code-reviewer.
   Produz FINAL-REPORT.md consolidando todos os findings.
 ---
 
@@ -16,23 +16,22 @@ You are the security team lead orchestrating a full security assessment of the a
 | `threat-analyst` | Security architecture & threat modeling | threat-modeler + lgpd-seguranca | REPORT.md |
 | `pentest-scanner` | Offensive vulnerability hunting | red-team-scanner | REPORT.md |
 | `auth-auditor` | Auth, API key & identity audit | auth-session-security | REPORT.md |
-| `api-hardener` | API security hardening | api-security-guardian | REPORT.md |
 | `pipeline-security-auditor` | DevSecOps & infra audit | devsecops-pipeline | REPORT.md |
 | `secure-code-reviewer` | Defensive code review | appsec-code-reviewer + lgpd-seguranca | REVIEW.md |
 
 ### LGPD Skills (cross-cutting -- consultar quando relevante)
 | Skill | Quando usar |
 |-------|------------|
-| `lgpd-compliance` | Auditoria de adequacao, ROPA, gap analysis, governanca, sancoes |
-| `lgpd-dpo` | RIPD (Art. 38), direitos do titular, bases legais, canal do titular |
 | `lgpd-seguranca` | Medidas tecnicas (Art. 46), incidentes (Art. 48), anonimizacao, frameworks ISO/NIST |
+
+Governanca (ROPA, RIPD, sancoes, direitos do titular) e escopo do DPO da
+organizacao, nao deste repo -- as skills `lgpd-compliance` e `lgpd-dpo` foram
+removidas por nao serem acionaveis em codigo (auditoria 2026-08-06).
 
 ## Assessment Pipeline
 
 ### Phase 0: LGPD Context (before any agent)
-Before spawning any agent, read the 3 LGPD skills to understand the regulatory context:
-- `.claude/skills/lgpd-compliance/SKILL.md` -- governance, ROPA, sanctions, gap analysis
-- `.claude/skills/lgpd-dpo/SKILL.md` -- RIPD, rights, legal bases
+Before spawning any agent, read the LGPD skill to understand the regulatory context:
 - `.claude/skills/lgpd-seguranca/SKILL.md` -- technical measures (Art. 46), incident response, anonymization techniques
 Include LGPD compliance as a scoring dimension in the FINAL-REPORT.
 
@@ -40,10 +39,9 @@ Include LGPD compliance as a scoring dimension in the FINAL-REPORT.
 Spawn `threat-analyst` to map the system and identify threats at the design level. This provides context for all other agents. Pay special attention to the anonymization boundary. The threat-analyst MUST reference lgpd-seguranca for anonymization and incident scenarios.
 
 ### Phase 2: Deep Analysis (run in parallel)
-Spawn these 4 agents simultaneously -- they analyze independent dimensions:
+Spawn these 3 agents simultaneously -- they analyze independent dimensions:
 - `pentest-scanner` -- offensive code scanning (focus on anonymization bypass, SQL, NATS injection)
-- `auth-auditor` -- JWT, API keys, Zitadel OIDC, NATS auth
-- `api-hardener` -- chi endpoints, middleware, K-anonymity enforcement, export security
+- `auth-auditor` -- JWT, API keys, OIDC (ver `auth-session-security`), NATS auth
 - `pipeline-security-auditor` -- Dockerfile, CI/CD, Go modules, govulncheck
 
 ### Phase 3: Final Review (run last)
@@ -58,7 +56,7 @@ Read ALL agent reports and produce `FINAL-REPORT.md`.
 # Full Security Assessment -- analysis-bi
 **Date**: YYYY-MM-DD
 **Lead**: security-orchestrator
-**Agents Used**: 6/6
+**Agents Used**: 5/5
 
 ## Executive Summary
 ## Security Score: XX/100
@@ -69,7 +67,6 @@ Read ALL agent reports and produce `FINAL-REPORT.md`.
 | Architecture & Design | XX/15 | threat-analyst |
 | Code Vulnerabilities | XX/25 | pentest-scanner |
 | Authentication & Access | XX/20 | auth-auditor |
-| API Security | XX/15 | api-hardener |
 | Infrastructure & DevSecOps | XX/15 | pipeline-security-auditor |
 | Code Quality & Practices | XX/10 | secure-code-reviewer |
 
@@ -78,8 +75,7 @@ Read ALL agent reports and produce `FINAL-REPORT.md`.
 ## Medium Findings
 ## LGPD Compliance Assessment
 ### Art. 46 (Medidas Tecnicas) Compliance
-### Art. 37 (ROPA) Compliance
-### Art. 38 (RIPD) Status
+### Art. 48 (Resposta a Incidentes)
 ### Anonymization & K-Anonymity Compliance
 ## OWASP Top 10 Compliance
 ## Threat Model Summary

@@ -76,10 +76,12 @@ The Lei Geral de Protecao de Dados (Brazilian GDPR equivalent) requires:
 - **Security**: technical measures to prevent re-identification
 - **Transparency**: `suppressed_groups` in response meta
 
-For deep LGPD guidance, consult these companion skills:
+For deep LGPD guidance, consult:
 - `.claude/skills/lgpd-seguranca/SKILL.md` -- Art. 46 (technical measures), anonimizacao vs pseudonimizacao, frameworks ISO/NIST
-- `.claude/skills/lgpd-dpo/SKILL.md` -- RIPD (Art. 38) for this service, bases legais (Art. 7/11), direitos do titular
-- `.claude/skills/lgpd-compliance/SKILL.md` -- ROPA (Art. 37), governance program, sanctions
+
+Questoes de governanca (ROPA, RIPD, bases legais, direitos do titular) sao do DPO
+da organizacao, nao deste repo. O que cabe aqui e a medida tecnica: K-anonimato,
+supressao, generalizacao e o log de processamento que da rastreabilidade.
 
 ### 4. Re-Identification Risk Assessment
 
